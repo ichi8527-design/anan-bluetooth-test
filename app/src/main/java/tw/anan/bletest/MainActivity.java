@@ -104,8 +104,16 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
-        scan.setOnClickListener(v -> startScan());
-    }
+        
+scan.setOnClickListener(v -> {
+    android.widget.Toast.makeText(
+        MainActivity.this,
+        "搜尋按鈕已點擊",
+        android.widget.Toast.LENGTH_LONG
+    ).show();
+    startScan();
+});
+}
 
     private boolean hasPermissions() {
         if (Build.VERSION.SDK_INT >= 31) {
