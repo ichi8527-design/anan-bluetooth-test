@@ -49,10 +49,11 @@ public class MainActivity extends Activity {
     private Button a,b,q;
     private volatile android.bluetooth.BluetoothSocket spp;
     private volatile int sppToken;
-    private Button sppTest;
+    private Button sppTest, sppPrint, sppTestA;
+    private volatile boolean sppBusy;
     private android.widget.EditText mac;
     private final Runnable classicStart = this::startClassic;
-    private void closeSpp(){sppToken++; android.bluetooth.BluetoothSocket old=spp; spp=null; if(old!=null)try{old.close();}catch(Exception ignored){} if(sppTest!=null)sppTest.setEnabled(false);}
+    private void closeSpp(){sppToken++; android.bluetooth.BluetoothSocket old=spp; spp=null; if(old!=null)try{old.close();}catch(Exception ignored){} sppBusy=false; if(sppTest!=null)sppTest.setEnabled(false); if(sppPrint!=null)sppPrint.setEnabled(false); if(sppTestA!=null)sppTestA.setEnabled(false);}
     private void paired(){
         if(!hasPermissions()) {checkAndScan();return;}
         BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
@@ -78,12 +79,33 @@ public class MainActivity extends Activity {
             local=d.createRfcommSocketToServiceRecord(UUID.fromString("00001101-0000-1000-8000-00805f9b34fb"));
             if(token!=sppToken){local.close();return;} spp=local;local.connect();
             if(token!=sppToken){local.close();return;}
-            handler.post(()->{if(token==sppToken){append("SPP 已連線");sppTest.setEnabled(true);}});
+            handler.post(()->{if(token==sppToken){append("SPP 已連線");sppTest.setEnabled(true);sppPrint.setEnabled(true);sppTestA.setEnabled(true);}});
             byte[] buf=new byte[1024];int n;while((n=local.getInputStream().read(buf))!=-1){if(token!=sppToken)break;append("SPP RX: "+hex(java.util.Arrays.copyOf(buf,n)));}
         }catch(Exception e){if(token==sppToken)append("SPP 錯誤："+e);}finally{if(local!=null)try{local.close();}catch(Exception ignored){}handler.post(()->{if(token==sppToken)closeSpp();});}}).start();
         handler.postDelayed(()->{if(token==sppToken && !sppTest.isEnabled()){append("SPP 連線逾時");closeSpp();}},20000);
     }
-    private void sppProbe(){final android.bluetooth.BluetoothSocket sock=spp;if(sock==null)return;new Thread(()->{try{sock.getOutputStream().write(frame(false,0xa3,0));sock.getOutputStream().flush();append("SPP TX: B 狀態查詢；等待回傳");}catch(Exception e){append("SPP TX 錯誤："+e);}}).start();}
+    private void sppProbe(){sppSend(false,false);}
+    private void sppSend(boolean print, boolean protocolA){
+        final android.bluetooth.BluetoothSocket sock=spp; final int token=sppToken;
+        if(sock==null || !sock.isConnected() || sppBusy)return;
+        sppBusy=true; sppTest.setEnabled(false);sppTestA.setEnabled(false);sppPrint.setEnabled(false);
+        new Thread(()->{try{
+            java.io.OutputStream out=sock.getOutputStream();
+            if(!print){byte[] f=frame(protocolA,protocolA?0xa1:0xa3,0);out.write(f);out.flush();append("SPP TX: "+hex(f)+"；等待回傳");Thread.sleep(5000);}
+            else {
+                append("SPP B：開始單張測試，240 列，請觀察出紙");
+                java.util.ArrayList<byte[]> frames=new java.util.ArrayList<>();
+                frames.add(frame(false,0xa3,0));
+                frames.add(frame(false,0xa6,0xaa,0x55,0x17,0x38,0x44,0x5f,0x5f,0x5f,0x44,0x38,0x2c));
+                frames.add(frame(false,0xbe,0));
+                for(byte[] row:raster()){int[] v=new int[48];for(int i=0;i<48;i++)v[i]=row[i]&255;frames.add(frame(false,0xa2,v));}
+                frames.add(frame(false,0xa6,0xaa,0x55,0x17,0,0,0,0,0,0,0,0x17));
+                frames.add(frame(false,0xa3,0));
+                int total=0;for(byte[] f:frames){if(token!=sppToken || !sock.isConnected())return;out.write(f);out.flush();total+=f.length;Thread.sleep(30);}
+                append("SPP B TX 完成："+total+" bytes；請確認實際出紙，勿連續重按");Thread.sleep(5000);
+            }
+        }catch(Exception e){if(token==sppToken)append("SPP TX 錯誤："+e);}finally{handler.post(()->{if(token==sppToken){sppBusy=false;boolean ok=spp==sock && sock.isConnected();sppTest.setEnabled(ok);sppTestA.setEnabled(ok);sppPrint.setEnabled(ok);}});}}).start();
+    }
 
     private final Set<String> seen = new HashSet<>();
     private static final int PERMISSION_REQUEST = 271;
@@ -102,6 +124,8 @@ public class MainActivity extends Activity {
         mac=new android.widget.EditText(this);mac.setSingleLine(true);mac.setHint("MAC：AA:BB:CC:DD:EE:FF");root.addView(mac);
         LinearLayout manualRow=new LinearLayout(this);root.addView(manualRow);button(manualRow,"MAC BLE",()->manual(false));button(manualRow,"MAC SPP",()->manual(true));
         sppTest=button(root,"SPP 狀態測試 B",this::sppProbe);sppTest.setEnabled(false);
+        sppTestA=button(root,"SPP 狀態測試 A",()->sppSend(false,true));sppTestA.setEnabled(false);
+        sppPrint=button(root,"SPP B：直接列印一張",()->sppSend(true,false));sppPrint.setEnabled(false);
         a = button(root,"A 趣列印協定：直接列印", () -> print(true));
         b = button(root,"B Cat 協定：直接列印", () -> print(false));
         q = button(root,"讀取狀態 A / B", () -> { if(!ready || busy) return; begin(tx); add(frame(true,0xA1,0)); add(frame(false,0xA3,0)); deadline(); pump(); });
@@ -109,14 +133,14 @@ public class MainActivity extends Activity {
         button(root,"停止傳送／斷線", () -> { stopScan(); closeSpp(); reset(); if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;} append("已停止；已送出的資料可能仍會列印。"); });
         status = new TextView(this);
         status.setTextSize(15);
-        status.setText("AQ-V268 測試版：直印 V4，兩種實驗協定。\n請先在趣列印中斷開印表機連線。\n");
+        status.setText("AQ-V268 測試版：直印 V5，兩種實驗協定。\n請先在趣列印中斷開印表機連線。\n");
         ScrollView log = new ScrollView(this); log.addView(status); root.addView(log,new LinearLayout.LayoutParams(-1,0,2));
         ScrollView scroll = new ScrollView(this);
         devices = new LinearLayout(this);
         devices.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(devices);
         root.addView(scroll, 4, new LinearLayout.LayoutParams(-1, 0, 2));
-        setContentView(root); refresh(); handler.post(this::checkAndScan);
+        setContentView(root); refresh(); handler.post(this::paired);
     }
 
     private void append(String message) {
@@ -186,7 +210,7 @@ public class MainActivity extends Activity {
         scanAdapter = manager == null ? null : manager.getAdapter();
         if(scanAdapter == null || !scanAdapter.isEnabled()) { append("請開啟藍牙"); return; }
         stopScan(); seen.clear(); devices.removeAllViews(); paired(); scanning=true;
-        append("V4：搜尋所有裝置，請保持畫面開啟");
+        append("V5：搜尋所有裝置，請保持畫面開啟");
         try {
             scanner=scanAdapter.getBluetoothLeScanner();
             if(scanner!=null) scanner.startScan(null,new android.bluetooth.le.ScanSettings.Builder().setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(),callback);
@@ -212,7 +236,7 @@ public class MainActivity extends Activity {
         try {if(scanner!=null)scanner.stopScan(callback);}catch(Exception ignored){}
         try {if(scanAdapter!=null)scanAdapter.cancelDiscovery();}catch(Exception ignored){}
         if(receiverRegistered){unregisterReceiver(discovery);receiverRegistered=false;}
-        append("搜尋結束，裝置紀錄數："+seen.size()+"；請點選裝置連線（列印仍使用 BLE）。");
+        append("搜尋結束，裝置紀錄數："+seen.size()+"；請點選裝置連線（支援 SPP B 測試列印）。");
     }
     private void connect(BluetoothDevice device, String label) {
         stopScan();
@@ -262,16 +286,4 @@ public class MainActivity extends Activity {
         byte[] v=queue.remove();int props=channel.getProperties();channel.setWriteType((props&4)!=0?BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE:BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);channel.setValue(v);waiting=true;try{if(!gatt.writeCharacteristic(channel)){waiting=false;fail("無法送出資料");return;}}catch(Exception e){fail(e.toString());return;}
         int token=generation;handler.postDelayed(()->{if(token==generation && busy && waiting) { /* overall deadline handles stalled callback */ }},1000);}
     private byte[][] raster(){Bitmap bm=Bitmap.createBitmap(384,240,Bitmap.Config.ARGB_8888);Canvas c=new Canvas(bm);c.drawColor(Color.WHITE);Paint p=new Paint(3);p.setColor(Color.BLACK);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(34);c.drawText("阿南檳榔",160,55,p);c.drawText("藍牙直印測試",160,105,p);p.setTextSize(30);c.drawText("AQ-V268",160,155,p);c.drawText("40 x 30 mm",160,200,p);byte[][] rows=new byte[240][48];for(int y=0;y<240;y++)for(int x=0;x<320;x++)if(Color.red(bm.getPixel(x,y))<128)rows[y][x/8]|=1<<(x%8);bm.recycle();return rows;}
-    private void print(boolean a){if(!ready || busy)return;begin(tx);deadline();append("開始協定 "+(a?"A":"B")+" 測試，320x240 內容／384 點資料列");if(a){stage=1;add(frame(true,0xa1,0));}else{add(frame(false,0xa3,0));add(frame(false,0xa6,0xaa,0x55,0x17,0x38,0x44,0x5f,0x5f,0x5f,0x44,0x38,0x2c));add(frame(false,0xbe,0));for(byte[] row:raster()){int[] v=new int[48];for(int i=0;i<48;i++)v[i]=row[i]&255;add(frame(false,0xa2,v));}add(frame(false,0xa6,0xaa,0x55,0x17,0,0,0,0,0,0,0,0x17));add(frame(false,0xa3,0));}pump();}
-    private void receive(byte[] v){append("RX: "+hex(v));if(v.length<9)return;int cmd=v[2]&255;if(v[0]==0x51 && v[1]==0x78 && cmd==0xae){int flags=v[6]&255;if((flags&15)!=0){fail("印表機回報可能異常");return;}paused=(flags&16)!=0;if(!paused)pump();}if(v[0]!=0x22 || v[1]!=0x21 || !busy)return;
-        if(stage==1 && cmd==0xa1){if(v.length<21 || v[12]!=0 || v[18]!=0){fail("A 狀態未確認就緒");return;}stage=2;add(frame(true,0xa9,240,0,48,0));pump();}
-        else if(stage==2 && cmd==0xa9){if(v[6]!=0){fail("A 啟動被拒絕");return;}stage=3;channel=data;for(byte[] row:raster())add(row);pump();}
-        else if(stage==4 && cmd==0xaa){stage=0;append("收到 A 完成通知，請確認實物。");pump();}}
-    @Override protected void onDestroy() {
-        stopScan();
-        closeSpp();
-        reset();
-        if (gatt != null) { gatt.disconnect(); gatt.close(); gatt = null; }
-        super.onDestroy();
-    }
-}
+    private void print(boolean a){if(!ready || busy)return;begin(tx);deadline();append("開始協定 "+(a?"A":"B")+" 測試，320x240 內容／384 點資料列");if(a){stage=1;add(
