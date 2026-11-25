@@ -38,7 +38,7 @@ jobs:
 
 
       - name: Build Test APK
-        run:         run: gradle --no-daemon assembleDebug --stacktrace
+        run: gradle --no-daemon assembleDebug --stacktrace
 
       - name: Upload Test APK
         uses: actions/upload-artifact@v4
