@@ -96,7 +96,7 @@ public class MainActivity extends Activity {
     private volatile boolean sppBusy;
     private android.widget.EditText mac;
     private final Runnable classicStart = this::startClassic;
-    private void closeSpp(){sppToken++; android.bluetooth.BluetoothSocket old=spp; spp=null; if(old!=null)try{old.close();}catch(Exception ignored){} sppBusy=false; extraEnabled(false); if(sppTest!=null)sppTest.setEnabled(false); if(sppPrint!=null)sppPrint.setEnabled(false); if(sppTestA!=null)sppTestA.setEnabled(false);}
+    private void closeSpp(){sppToken++; if(connectionLabel!=null)connectionLabel.setText("尚未連線"); android.bluetooth.BluetoothSocket old=spp; spp=null; if(old!=null)try{old.close();}catch(Exception ignored){} sppBusy=false; extraEnabled(false); if(sppTest!=null)sppTest.setEnabled(false); if(sppPrint!=null)sppPrint.setEnabled(false); if(sppTestA!=null)sppTestA.setEnabled(false);}
     private void paired(){
         if(!hasPermissions()) {checkAndScan();return;}
         BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
@@ -117,12 +117,12 @@ public class MainActivity extends Activity {
     }catch(Exception e){append("手動連線錯誤："+e);}}
     private void connectSpp(BluetoothDevice d){
         stopScan();closeSpp();reset();if(gatt!=null){gatt.close();gatt=null;}
-        final int token=sppToken;append("SPP 連線中："+d.getAddress());
+        final int token=sppToken;if(connectionLabel!=null)connectionLabel.setText("SPP 連線中…");append("SPP 連線中："+d.getAddress());
         new Thread(()->{android.bluetooth.BluetoothSocket local=null;try{
             local=d.createRfcommSocketToServiceRecord(UUID.fromString("00001101-0000-1000-8000-00805f9b34fb"));
             if(token!=sppToken){local.close();return;} spp=local;local.connect();
             if(token!=sppToken){local.close();return;}
-            handler.post(()->{if(token==sppToken){append("SPP 已連線");sppTest.setEnabled(true);sppPrint.setEnabled(true);sppTestA.setEnabled(true);extraEnabled(true);}});
+            handler.post(()->{if(token==sppToken){append("SPP 已連線");if(connectionLabel!=null)connectionLabel.setText("SPP 已連線");sppTest.setEnabled(true);sppPrint.setEnabled(true);sppTestA.setEnabled(true);extraEnabled(true);}});
             byte[] buf=new byte[1024];int n;while((n=local.getInputStream().read(buf))!=-1){if(token!=sppToken)break;byte[] received=java.util.Arrays.copyOf(buf,n);append("SPP RX: "+hex(received));if(replies.size()<256)replies.offer(received);}
         }catch(Exception e){if(token==sppToken)append("SPP 錯誤："+e);}finally{if(local!=null)try{local.close();}catch(Exception ignored){}handler.post(()->{if(token==sppToken)closeSpp();});}}).start();
         handler.postDelayed(()->{if(token==sppToken && (spp==null || !spp.isConnected())){append("SPP 連線逾時");closeSpp();}},20000);
@@ -153,38 +153,43 @@ public class MainActivity extends Activity {
     private final Set<String> seen = new HashSet<>();
     private static final int PERMISSION_REQUEST = 271;
 
+    private TextView connectionLabel;
+    private boolean pendingPrinterConnect;
+    private void connectPrinter(){
+        if(!hasPermissions()){
+            pendingPrinterConnect=true;
+            if(Build.VERSION.SDK_INT>=31) requestPermissions(new String[]{Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT},PERMISSION_REQUEST);
+            else requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},PERMISSION_REQUEST);
+            return;
+        }
+        try {
+            BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
+            if(ad==null || !ad.isEnabled()){append("請開啟藍牙");return;}
+            connectSpp(ad.getRemoteDevice("00:00:00:33:41:C0"));
+        }catch(Exception e){append("連線錯誤："+e);}
+    }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(24, 24, 24, 24);
-        root.setOnApplyWindowInsetsListener((v,i) -> { v.setPadding(24,24+i.getSystemWindowInsetTop(),24,24+i.getSystemWindowInsetBottom()); return i; });
-        Button scan = new Button(this);
-        scan.setText("搜尋附近藍牙標籤機（30 秒）");
-        scan.setOnClickListener(v -> checkAndScan());
-        root.addView(scan);
-        button(root,"讀取已配對裝置",()->{seen.clear();devices.removeAllViews();paired();});
-        mac=new android.widget.EditText(this);mac.setSingleLine(true);mac.setHint("MAC：AA:BB:CC:DD:EE:FF");root.addView(mac);
-        LinearLayout manualRow=new LinearLayout(this);root.addView(manualRow);button(manualRow,"MAC BLE",()->manual(false));button(manualRow,"MAC SPP",()->manual(true));
-        sppTest=button(root,"SPP 狀態測試 B",this::sppProbe);sppTest.setEnabled(false);
-        sppTestA=button(root,"SPP 狀態測試 A",()->sppSend(false,true));sppTestA.setEnabled(false);
-        sppPrint=button(root,"SPP B：直接列印一張",()->sppSend(true,false));sppPrint.setEnabled(false);
-        extra(root,"SPP A：握手後列印",0);extra(root,"SPP TSPL：測試一張",1);extra(root,"SPP CPCL：測試一張",2);extra(root,"SPP ESC/POS：短文字",3);
-        a = button(root,"A 趣列印協定：直接列印", () -> print(true));
-        b = button(root,"B Cat 協定：直接列印", () -> print(false));
-        q = button(root,"讀取狀態 A / B", () -> { if(!ready || busy) return; begin(tx); add(frame(true,0xA1,0)); add(frame(false,0xA3,0)); deadline(); pump(); });
-        button(root,"複製全部紀錄", () -> ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("BLE",status.getText())));
-        button(root,"停止傳送／斷線", () -> { stopScan(); closeSpp(); reset(); if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;} append("已停止；已送出的資料可能仍會列印。"); });
-        status = new TextView(this);
-        status.setTextSize(15);
-        status.setText("AQ-V268 測試版：直印 V6，多協定實驗。\n請先在趣列印中斷開印表機連線。\n");
-        ScrollView log = new ScrollView(this); log.addView(status); root.addView(log,new LinearLayout.LayoutParams(-1,600));
-        ScrollView scroll = new ScrollView(this);
-        devices = new LinearLayout(this);
-        devices.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(devices);
-        root.addView(scroll, 4, new LinearLayout.LayoutParams(-1, 400));
-        ScrollView outer=new ScrollView(this);outer.addView(root);setContentView(outer); refresh(); handler.post(this::paired);
+        LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout controls=new LinearLayout(this);controls.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(20,20,20,20);
+        root.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(20,20+i.getSystemWindowInsetTop(),20,20+i.getSystemWindowInsetBottom());return i;});
+        TextView title=new TextView(this);title.setTextSize(22);title.setText("阿南直印 V7 — AQ-V268");root.addView(title);
+        connectionLabel=new TextView(this);connectionLabel.setTextSize(17);connectionLabel.setText("尚未連線");root.addView(connectionLabel);
+        button(root,"一鍵 SPP 連線 AQ-V268",this::connectPrinter);
+        button(root,"停止傳送／斷線",()->{stopScan();closeSpp();reset();if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;}append("已停止；已送出的資料可能仍會列印。");});
+        ScrollView outer=new ScrollView(this);outer.addView(controls);root.addView(outer,new LinearLayout.LayoutParams(-1,0,1));
+        extra(controls,"① SPP A：握手後列印",0);extra(controls,"② SPP TSPL：測試一張",1);extra(controls,"③ SPP CPCL：測試一張",2);extra(controls,"④ SPP ESC/POS：短文字",3);
+        sppPrint=button(controls,"⑤ SPP B：直接列印一張",()->sppSend(true,false));sppPrint.setEnabled(false);
+        sppTestA=button(controls,"SPP 狀態測試 A",()->sppSend(false,true));sppTestA.setEnabled(false);
+        sppTest=button(controls,"SPP 狀態測試 B",this::sppProbe);sppTest.setEnabled(false);
+        a=button(controls,"BLE A",()->print(true));b=button(controls,"BLE B",()->print(false));q=button(controls,"BLE 狀態",()->{});
+        a.setVisibility(View.GONE);b.setVisibility(View.GONE);q.setVisibility(View.GONE);
+        devices=new LinearLayout(this);
+        button(root,"複製全部紀錄",()->((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("SPP",status.getText())));
+        status=new TextView(this);status.setTextSize(14);status.setText("V7：請先連線 AQ-V268，再逐一測試。\n");
+        ScrollView log=new ScrollView(this);log.addView(status);root.addView(log,new LinearLayout.LayoutParams(-1,0,1));
+        setContentView(root);root.requestApplyInsets();refresh();
     }
 
     private void append(String message) {
@@ -211,7 +216,7 @@ public class MainActivity extends Activity {
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == PERMISSION_REQUEST) {
-            if (hasPermissions()) startScan();
+            if (hasPermissions()) { if(pendingPrinterConnect){pendingPrinterConnect=false;connectPrinter();}else startScan(); }
             else append("請允許附近裝置／位置權限，才能搜尋 BLE 裝置。");
         }
     }
