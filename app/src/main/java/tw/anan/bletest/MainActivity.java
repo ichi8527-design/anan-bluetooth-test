@@ -47,6 +47,44 @@ public class MainActivity extends Activity {
     private BluetoothGattCharacteristic channel;
     private static UUID uuid(int n) { return UUID.fromString(String.format(java.util.Locale.US,"0000%04x-0000-1000-8000-00805f9b34fb",n)); }
     private Button a,b,q;
+    private volatile android.bluetooth.BluetoothSocket spp;
+    private volatile int sppToken;
+    private Button sppTest;
+    private android.widget.EditText mac;
+    private final Runnable classicStart = this::startClassic;
+    private void closeSpp(){sppToken++; android.bluetooth.BluetoothSocket old=spp; spp=null; if(old!=null)try{old.close();}catch(Exception ignored){} if(sppTest!=null)sppTest.setEnabled(false);}
+    private void paired(){
+        if(!hasPermissions()) {checkAndScan();return;}
+        BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
+        if(ad==null || !ad.isEnabled()){append("藍牙未開啟");return;}
+        try{for(BluetoothDevice d:ad.getBondedDevices()){
+            String name=d.getName(); if(name==null)name="未命名";
+            if(!seen.add("paired"+d.getAddress()))continue;
+            final String label=name+" / "+d.getAddress();
+            append("已配對："+label);
+            button(devices,label+"：BLE 連線",()->connect(d,label));
+            button(devices,label+"：SPP 連線",()->connectSpp(d));
+        }}catch(Exception e){append("已配對讀取失敗："+e);}
+    }
+    private void manual(boolean classic){try{
+        BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
+        BluetoothDevice d=ad.getRemoteDevice(mac.getText().toString().trim().toUpperCase(java.util.Locale.US));
+        if(classic)connectSpp(d);else connect(d,d.getAddress());
+    }catch(Exception e){append("手動連線錯誤："+e);}}
+    private void connectSpp(BluetoothDevice d){
+        stopScan();closeSpp();reset();if(gatt!=null){gatt.close();gatt=null;}
+        final int token=sppToken;append("SPP 連線中："+d.getAddress());
+        new Thread(()->{android.bluetooth.BluetoothSocket local=null;try{
+            local=d.createRfcommSocketToServiceRecord(UUID.fromString("00001101-0000-1000-8000-00805f9b34fb"));
+            if(token!=sppToken){local.close();return;} spp=local;local.connect();
+            if(token!=sppToken){local.close();return;}
+            handler.post(()->{if(token==sppToken){append("SPP 已連線");sppTest.setEnabled(true);}});
+            byte[] buf=new byte[1024];int n;while((n=local.getInputStream().read(buf))!=-1){if(token!=sppToken)break;append("SPP RX: "+hex(java.util.Arrays.copyOf(buf,n)));}
+        }catch(Exception e){if(token==sppToken)append("SPP 錯誤："+e);}finally{if(local!=null)try{local.close();}catch(Exception ignored){}handler.post(()->{if(token==sppToken)closeSpp();});}}).start();
+        handler.postDelayed(()->{if(token==sppToken && !sppTest.isEnabled()){append("SPP 連線逾時");closeSpp();}},20000);
+    }
+    private void sppProbe(){final android.bluetooth.BluetoothSocket sock=spp;if(sock==null)return;new Thread(()->{try{sock.getOutputStream().write(frame(false,0xa3,0));sock.getOutputStream().flush();append("SPP TX: B 狀態查詢；等待回傳");}catch(Exception e){append("SPP TX 錯誤："+e);}}).start();}
+
     private final Set<String> seen = new HashSet<>();
     private static final int PERMISSION_REQUEST = 271;
 
@@ -60,20 +98,24 @@ public class MainActivity extends Activity {
         scan.setText("搜尋附近藍牙標籤機（30 秒）");
         scan.setOnClickListener(v -> checkAndScan());
         root.addView(scan);
+        button(root,"讀取已配對裝置",()->{seen.clear();devices.removeAllViews();paired();});
+        mac=new android.widget.EditText(this);mac.setSingleLine(true);mac.setHint("MAC：AA:BB:CC:DD:EE:FF");root.addView(mac);
+        LinearLayout manualRow=new LinearLayout(this);root.addView(manualRow);button(manualRow,"MAC BLE",()->manual(false));button(manualRow,"MAC SPP",()->manual(true));
+        sppTest=button(root,"SPP 狀態測試 B",this::sppProbe);sppTest.setEnabled(false);
         a = button(root,"A 趣列印協定：直接列印", () -> print(true));
         b = button(root,"B Cat 協定：直接列印", () -> print(false));
         q = button(root,"讀取狀態 A / B", () -> { if(!ready || busy) return; begin(tx); add(frame(true,0xA1,0)); add(frame(false,0xA3,0)); deadline(); pump(); });
         button(root,"複製全部紀錄", () -> ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("BLE",status.getText())));
-        button(root,"停止傳送／斷線", () -> { stopScan(); reset(); if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;} append("已停止；已送出的資料可能仍會列印。"); });
+        button(root,"停止傳送／斷線", () -> { stopScan(); closeSpp(); reset(); if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;} append("已停止；已送出的資料可能仍會列印。"); });
         status = new TextView(this);
         status.setTextSize(15);
-        status.setText("AQ-V268 測試版：直印 V3，兩種實驗協定。\n請先在趣列印中斷開印表機連線。\n");
+        status.setText("AQ-V268 測試版：直印 V4，兩種實驗協定。\n請先在趣列印中斷開印表機連線。\n");
         ScrollView log = new ScrollView(this); log.addView(status); root.addView(log,new LinearLayout.LayoutParams(-1,0,2));
         ScrollView scroll = new ScrollView(this);
         devices = new LinearLayout(this);
         devices.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(devices);
-        root.addView(scroll, 1, new LinearLayout.LayoutParams(-1, 0, 2));
+        root.addView(scroll, 4, new LinearLayout.LayoutParams(-1, 0, 2));
         setContentView(root); refresh(); handler.post(this::checkAndScan);
     }
 
@@ -121,7 +163,7 @@ public class MainActivity extends Activity {
             append(label);
             Button item = new Button(this);
             item.setAllCaps(false); item.setText(label);
-            item.setOnClickListener(v -> connect(device,label));
+            item.setOnClickListener(v -> {if(type.equals("Classic"))connectSpp(device);else connect(device,label);});
             devices.addView(item);
         });
     }
@@ -143,14 +185,17 @@ public class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager)getSystemService(Context.BLUETOOTH_SERVICE);
         scanAdapter = manager == null ? null : manager.getAdapter();
         if(scanAdapter == null || !scanAdapter.isEnabled()) { append("請開啟藍牙"); return; }
-        stopScan(); seen.clear(); devices.removeAllViews(); scanning=true;
-        append("V3：搜尋所有裝置，請保持畫面開啟");
+        stopScan(); seen.clear(); devices.removeAllViews(); paired(); scanning=true;
+        append("V4：搜尋所有裝置，請保持畫面開啟");
         try {
             scanner=scanAdapter.getBluetoothLeScanner();
             if(scanner!=null) scanner.startScan(null,new android.bluetooth.le.ScanSettings.Builder().setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(),callback);
             else append("BLE 掃描器不可用");
         } catch(Exception e){append("BLE 錯誤："+e);}
-        handler.postDelayed(() -> {
+        handler.postDelayed(classicStart,15000);
+        handler.postDelayed(scanTimeout,30000);
+    }
+    private void startClassic(){
             if(!scanning)return;
             try {
                 if(scanner!=null)scanner.stopScan(callback);
@@ -159,12 +204,11 @@ public class MainActivity extends Activity {
                 receiverRegistered=true;
                 append("傳統藍牙搜尋啟動："+scanAdapter.startDiscovery());
             } catch(Exception e){append("傳統藍牙錯誤："+e);}
-        },15000);
-        handler.postDelayed(scanTimeout,30000);
+
     }
     private void stopScan() {
         if(!scanning)return;
-        scanning=false; handler.removeCallbacks(scanTimeout);
+        scanning=false; handler.removeCallbacks(scanTimeout); handler.removeCallbacks(classicStart);
         try {if(scanner!=null)scanner.stopScan(callback);}catch(Exception ignored){}
         try {if(scanAdapter!=null)scanAdapter.cancelDiscovery();}catch(Exception ignored){}
         if(receiverRegistered){unregisterReceiver(discovery);receiverRegistered=false;}
@@ -172,6 +216,7 @@ public class MainActivity extends Activity {
     }
     private void connect(BluetoothDevice device, String label) {
         stopScan();
+        closeSpp();
         reset();
         if (gatt != null) { gatt.close(); gatt = null; }
         append("正在連接：" + label);
@@ -179,7 +224,7 @@ public class MainActivity extends Activity {
             @Override public void onConnectionStateChange(BluetoothGatt connection, int statusCode, int newState) {
                 append("連線狀態：" + newState + "，狀態碼：" + statusCode);
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    try { connection.discoverServices(); } catch (Exception e) { append("服務探索錯誤：" + e.getMessage()); }
+                    try { append("服務探索啟動："+connection.discoverServices()); } catch (Exception e) { append("服務探索錯誤：" + e.getMessage()); }
                 }
                 if (newState == BluetoothProfile.STATE_DISCONNECTED) handler.post(() -> {if(connection==gatt){reset();append("已斷線。");}});
             }
@@ -197,10 +242,10 @@ public class MainActivity extends Activity {
             @Override public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor d,int code){handler.post(() -> {if(g!=gatt)return; ready=code==0; refresh(); append("通知訂閱狀態："+code);});}
             @Override public void onCharacteristicChanged(BluetoothGatt g,BluetoothGattCharacteristic c){byte[] v=c.getValue().clone();handler.post(() -> {if(g==gatt) receive(v);});}
             @Override public void onCharacteristicWrite(BluetoothGatt g,BluetoothGattCharacteristic c,int code){handler.post(() -> {if(g!=gatt || !waiting)return; waiting=false; if(code!=0){fail("寫入錯誤 "+code);return;} handler.postDelayed(MainActivity.this::pump,25);});}
-        }); } catch (Exception e) { append("連線失敗：" + e.getMessage()); }
+        }, BluetoothDevice.TRANSPORT_LE); } catch (Exception e) { append("連線失敗：" + e.getMessage()); }
     }
 
-    private Button button(LinearLayout root,String label,Runnable task){Button v=new Button(this);v.setText(label);v.setOnClickListener(w->task.run());root.addView(v);return v;}
+    private Button button(LinearLayout root,String label,Runnable task){Button v=new Button(this);v.setText(label);v.setMinHeight(0);v.setMinimumHeight(0);v.setTextSize(13);v.setOnClickListener(w->task.run());root.addView(v);return v;}
     private void refresh(){a.setEnabled(ready && !busy && data!=null);b.setEnabled(ready && !busy);q.setEnabled(ready && !busy);}
     private void reset(){generation++;ready=false;busy=false;waiting=false;paused=false;stage=0;queue.clear();tx=null;data=null;refresh();}
     private void fail(String reason){append(reason+"；請斷線後重試。");reset();}
@@ -224,6 +269,7 @@ public class MainActivity extends Activity {
         else if(stage==4 && cmd==0xaa){stage=0;append("收到 A 完成通知，請確認實物。");pump();}}
     @Override protected void onDestroy() {
         stopScan();
+        closeSpp();
         reset();
         if (gatt != null) { gatt.disconnect(); gatt.close(); gatt = null; }
         super.onDestroy();
