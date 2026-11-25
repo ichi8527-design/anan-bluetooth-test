@@ -55,24 +55,25 @@ public class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(24, 24, 24, 24);
+        root.setOnApplyWindowInsetsListener((v,i) -> { v.setPadding(24,24+i.getSystemWindowInsetTop(),24,24+i.getSystemWindowInsetBottom()); return i; });
         Button scan = new Button(this);
-        scan.setText("搜尋附近藍牙標籤機（12 秒）");
+        scan.setText("搜尋附近藍牙標籤機（30 秒）");
         scan.setOnClickListener(v -> checkAndScan());
         root.addView(scan);
         a = button(root,"A 趣列印協定：直接列印", () -> print(true));
         b = button(root,"B Cat 協定：直接列印", () -> print(false));
         q = button(root,"讀取狀態 A / B", () -> { if(!ready || busy) return; begin(tx); add(frame(true,0xA1,0)); add(frame(false,0xA3,0)); deadline(); pump(); });
         button(root,"複製全部紀錄", () -> ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("BLE",status.getText())));
-        button(root,"停止傳送／斷線", () -> { reset(); if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;} append("已停止；已送出的資料可能仍會列印。"); });
+        button(root,"停止傳送／斷線", () -> { stopScan(); reset(); if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;} append("已停止；已送出的資料可能仍會列印。"); });
         status = new TextView(this);
         status.setTextSize(15);
-        status.setText("AQ-V268 測試版：直印 V2，兩種實驗協定。\n請先在趣列印中斷開印表機連線。\n");
+        status.setText("AQ-V268 測試版：直印 V3，兩種實驗協定。\n請先在趣列印中斷開印表機連線。\n");
         ScrollView log = new ScrollView(this); log.addView(status); root.addView(log,new LinearLayout.LayoutParams(-1,0,2));
         ScrollView scroll = new ScrollView(this);
         devices = new LinearLayout(this);
         devices.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(devices);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        root.addView(scroll, 1, new LinearLayout.LayoutParams(-1, 0, 2));
         setContentView(root); refresh(); handler.post(this::checkAndScan);
     }
 
@@ -105,52 +106,70 @@ public class MainActivity extends Activity {
         }
     }
 
-    private final ScanCallback callback = new ScanCallback() {
-        @Override public void onScanResult(int callbackType, ScanResult result) {
-            BluetoothDevice device = result.getDevice();
+    private BluetoothAdapter scanAdapter;
+    private boolean receiverRegistered;
+    private final Runnable scanTimeout = this::stopScan;
+    private void found(BluetoothDevice device, String advertised, int rssi, String type) {
+        handler.post(() -> {
+            if (!scanning) return;
             String address = device.getAddress();
-            if (!seen.add(address)) return;
-            String name;
-            try { name = device.getName(); } catch (SecurityException e) { name = null; }
-            if (name == null || name.isEmpty()) name = "未命名 BLE 裝置";
-            final String label = name + "  (RSSI " + result.getRssi() + ")";
-            runOnUiThread(() -> {
-                Button button = new Button(MainActivity.this);
-                button.setAllCaps(false);
-                button.setText(label);
-                button.setOnClickListener(v -> connect(device, label));
-                devices.addView(button);
-                if(scanning && label.toUpperCase(java.util.Locale.ROOT).replace("-", "").contains("AQV268")) connect(device,label);
-            });
+            String name = advertised;
+            if (name == null || name.isEmpty()) name = device.getName();
+            if (name == null || name.isEmpty()) name = "未命名裝置";
+            if (!seen.add(type + address)) return;
+            final String label = name + " / " + type + " / " + address + " / RSSI " + rssi;
+            append(label);
+            Button item = new Button(this);
+            item.setAllCaps(false); item.setText(label);
+            item.setOnClickListener(v -> connect(device,label));
+            devices.addView(item);
+        });
+    }
+    private final android.content.BroadcastReceiver discovery = new android.content.BroadcastReceiver() {
+        @Override public void onReceive(Context c, android.content.Intent i) {
+            if (BluetoothDevice.ACTION_FOUND.equals(i.getAction())) {
+                BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if(d != null) found(d,null,i.getShortExtra(BluetoothDevice.EXTRA_RSSI,(short)0),"Classic");
+            }
         }
-        @Override public void onScanFailed(int errorCode) { append("搜尋失敗，代碼：" + errorCode); scanning = false; }
     };
-
+    private final ScanCallback callback = new ScanCallback() {
+        @Override public void onScanResult(int t, ScanResult r) {
+            found(r.getDevice(),r.getScanRecord()==null?null:r.getScanRecord().getDeviceName(),r.getRssi(),"BLE");
+        }
+        @Override public void onScanFailed(int code) { append("BLE 搜尋失敗："+code); }
+    };
     private void startScan() {
         BluetoothManager manager = (BluetoothManager)getSystemService(Context.BLUETOOTH_SERVICE);
-        BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
-        if (adapter == null || !adapter.isEnabled()) { append("請先開啟手機藍牙。"); return; }
-        stopScan();
-        seen.clear();
-        devices.removeAllViews();
-        scanner = adapter.getBluetoothLeScanner();
-        if (scanner == null) { append("無法取得 BLE 掃描器。"); return; }
+        scanAdapter = manager == null ? null : manager.getAdapter();
+        if(scanAdapter == null || !scanAdapter.isEnabled()) { append("請開啟藍牙"); return; }
+        stopScan(); seen.clear(); devices.removeAllViews(); scanning=true;
+        append("V3：搜尋所有裝置，請保持畫面開啟");
         try {
-            scanner.startScan(callback);
-            scanning = true;
-            append("正在搜尋附近 BLE 裝置…");
-            handler.postDelayed(this::stopScan, 12000);
-        } catch (Exception e) { append("搜尋錯誤：" + e.getMessage()); }
+            scanner=scanAdapter.getBluetoothLeScanner();
+            if(scanner!=null) scanner.startScan(null,new android.bluetooth.le.ScanSettings.Builder().setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(),callback);
+            else append("BLE 掃描器不可用");
+        } catch(Exception e){append("BLE 錯誤："+e);}
+        handler.postDelayed(() -> {
+            if(!scanning)return;
+            try {
+                if(scanner!=null)scanner.stopScan(callback);
+                android.content.IntentFilter f=new android.content.IntentFilter(BluetoothDevice.ACTION_FOUND);
+                if(Build.VERSION.SDK_INT>=33)registerReceiver(discovery,f,Context.RECEIVER_EXPORTED); else registerReceiver(discovery,f);
+                receiverRegistered=true;
+                append("傳統藍牙搜尋啟動："+scanAdapter.startDiscovery());
+            } catch(Exception e){append("傳統藍牙錯誤："+e);}
+        },15000);
+        handler.postDelayed(scanTimeout,30000);
     }
-
     private void stopScan() {
-        if (scanning && scanner != null) {
-            try { scanner.stopScan(callback); } catch (Exception ignored) { }
-            scanning = false;
-            append("搜尋已結束，可點選 AQ-V268 裝置連線。");
-        }
+        if(!scanning)return;
+        scanning=false; handler.removeCallbacks(scanTimeout);
+        try {if(scanner!=null)scanner.stopScan(callback);}catch(Exception ignored){}
+        try {if(scanAdapter!=null)scanAdapter.cancelDiscovery();}catch(Exception ignored){}
+        if(receiverRegistered){unregisterReceiver(discovery);receiverRegistered=false;}
+        append("搜尋結束，裝置紀錄數："+seen.size()+"；請點選裝置連線（列印仍使用 BLE）。");
     }
-
     private void connect(BluetoothDevice device, String label) {
         stopScan();
         reset();
