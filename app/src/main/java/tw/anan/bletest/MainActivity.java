@@ -1,350 +1,60 @@
 package tw.anan.bletest;
-
 import android.Manifest;
 import android.app.Activity;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothGatt;
-import android.bluetooth.BluetoothGattCallback;
-import android.bluetooth.BluetoothGattCharacteristic;
-import android.bluetooth.BluetoothGattService;
-import android.bluetooth.BluetoothManager;
-import android.bluetooth.BluetoothProfile;
-import android.bluetooth.le.BluetoothLeScanner;
-import android.bluetooth.le.ScanCallback;
-import android.bluetooth.le.ScanResult;
-import android.content.Context;
+import android.bluetooth.*;
+import android.content.*;
 import android.content.pm.PackageManager;
-import android.os.Build;
-import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
-import android.view.View;
-import android.widget.Button;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.TextView;
-import java.util.HashSet;
+import android.os.*;
+import android.widget.*;
+import java.io.*;
 import java.util.UUID;
-import java.util.ArrayDeque;
-import android.bluetooth.BluetoothGattDescriptor;
-import android.graphics.*;
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import java.util.Set;
 
 public class MainActivity extends Activity {
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private TextView status;
-    private LinearLayout devices;
-    private BluetoothLeScanner scanner;
-    private BluetoothGatt gatt;
-    private boolean scanning = false;
-    private BluetoothGattCharacteristic tx, data;
-    private boolean ready, busy, waiting, paused;
-    private int stage, generation;
-    private final ArrayDeque<byte[]> queue = new ArrayDeque<>();
-    private BluetoothGattCharacteristic channel;
-    private static UUID uuid(int n) { return UUID.fromString(String.format(java.util.Locale.US,"0000%04x-0000-1000-8000-00805f9b34fb",n)); }
-    private Button a,b,q;
-    private volatile android.bluetooth.BluetoothSocket spp;
-    private volatile int sppToken;
-    private Button sppTest, sppPrint, sppTestA;
-    private final java.util.ArrayList<Button> extraSpp = new java.util.ArrayList<>();
-    private final java.util.concurrent.LinkedBlockingQueue<byte[]> replies = new java.util.concurrent.LinkedBlockingQueue<>();
-    private void extraEnabled(boolean enabled){for(Button v:extraSpp)v.setEnabled(enabled);}
-    private void extra(LinearLayout root,String label,int mode){Button v=button(root,label,()->sppExtra(mode));v.setEnabled(false);extraSpp.add(v);}
-    private void sppExtra(int mode){
-        final android.bluetooth.BluetoothSocket sock=spp; final int token=sppToken;
-        if(sock==null || !sock.isConnected() || sppBusy)return;
-        sppBusy=true; extraEnabled(false);sppTest.setEnabled(false);sppTestA.setEnabled(false);sppPrint.setEnabled(false);
-        new Thread(()->{try{
-            java.io.OutputStream out=sock.getOutputStream();
-            String[] names={"A","TSPL","CPCL","ESC/POS"};
-            append("SPP "+names[mode]+"：單次測試");
-            if(mode==0){
-                replies.clear(); sendChunk(out,frame(true,0xa1,0),token);
-                byte[] r=awaitA(0xa1,token);
-                if(r.length<21 || r[12]!=0 || r[18]!=0)throw new java.io.IOException("A 狀態未確認就緒");
-                sendChunk(out,frame(true,0xa9,240,0,48,0),token);
-                r=awaitA(0xa9,token);if(r.length<9 || r[6]!=0)throw new java.io.IOException("A 啟動未確認");
-                for(byte[] row:raster())sendChunk(out,row,token,false);
-                sendChunk(out,frame(true,0xad,0),token);
-                append("A 圖片資料 11520 bytes 已寫入，等待完成通知");
-                awaitA(0xaa,token);
-            }else{
-                byte[] payload;
-                if(mode==1)payload=("SIZE 40 mm,30 mm\r\nGAP 2 mm,0 mm\r\nCLS\r\nTEXT 24,40,\"3\",0,1,1,\"AQ-V268 TEST\"\r\nPRINT 1,1\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-                else if(mode==2)payload=("! 0 200 200 240 1\r\nTEXT 4 0 24 40 AQ-V268 TEST\r\nFORM\r\nPRINT\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-                else {java.io.ByteArrayOutputStream buf=new java.io.ByteArrayOutputStream();buf.write(new byte[]{27,64});buf.write("AQ-V268 TEST\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));buf.write(new byte[]{27,100,2});payload=buf.toByteArray();}
-                sendChunk(out,payload,token);append("TX 完成："+payload.length+" bytes；請觀察出紙");
-            }
-            Thread.sleep(5000);
-        }catch(Exception e){if(token==sppToken)append("SPP 測試錯誤："+e);}
-        finally{handler.post(()->{if(token==sppToken){sppBusy=false;boolean ok=spp==sock && sock.isConnected();extraEnabled(ok);sppTest.setEnabled(ok);sppTestA.setEnabled(ok);sppPrint.setEnabled(ok);extraEnabled(ok);}});}}).start();
-    }
-    private void sendChunk(java.io.OutputStream out,byte[] v,int token)throws Exception{sendChunk(out,v,token,true);}
-    private void sendChunk(java.io.OutputStream out,byte[] v,int token,boolean log)throws Exception{
-        if(log)append("SPP TX HEX: "+hex(v));
-        for(int i=0;i<v.length;i+=64){if(token!=sppToken)throw new java.io.IOException("已停止");out.write(v,i,Math.min(64,v.length-i));out.flush();Thread.sleep(30);}
-    }
-    private byte[] awaitA(int cmd,int token)throws Exception{
-        java.io.ByteArrayOutputStream buf=new java.io.ByteArrayOutputStream();long end=android.os.SystemClock.elapsedRealtime()+5000;
-        while(token==sppToken && android.os.SystemClock.elapsedRealtime()<end){byte[] part=replies.poll(200,java.util.concurrent.TimeUnit.MILLISECONDS);if(part==null)continue;buf.write(part);byte[] v=buf.toByteArray();int i=0;while(i+6<=v.length){if(v[i]!=0x22 || v[i+1]!=0x21){i++;continue;}int n=(v[i+4]&255)+((v[i+5]&255)<<8)+8;if(n>4096){i++;continue;}if(i+n>v.length)break;if((v[i+2]&255)==cmd && (v[i+n-1]&255)==255)return java.util.Arrays.copyOfRange(v,i,i+n);i+=n;}buf.reset();buf.write(v,i,v.length-i);}
-        throw new java.io.IOException("A 回傳逾時："+Integer.toHexString(cmd));
-    }
-    private volatile boolean sppBusy;
-    private android.widget.EditText mac;
-    private final Runnable classicStart = this::startClassic;
-    private void closeSpp(){sppToken++; if(connectionLabel!=null)connectionLabel.setText("尚未連線"); android.bluetooth.BluetoothSocket old=spp; spp=null; if(old!=null)try{old.close();}catch(Exception ignored){} sppBusy=false; extraEnabled(false); if(sppTest!=null)sppTest.setEnabled(false); if(sppPrint!=null)sppPrint.setEnabled(false); if(sppTestA!=null)sppTestA.setEnabled(false);}
-    private void paired(){
-        if(!hasPermissions()) {checkAndScan();return;}
-        BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
-        if(ad==null || !ad.isEnabled()){append("藍牙未開啟");return;}
-        try{for(BluetoothDevice d:ad.getBondedDevices()){
-            String name=d.getName(); if(name==null)name="未命名";
-            if(!seen.add("paired"+d.getAddress()))continue;
-            final String label=name+" / "+d.getAddress();
-            append("已配對："+label);
-            button(devices,label+"：BLE 連線",()->connect(d,label));
-            button(devices,label+"：SPP 連線",()->connectSpp(d));
-        }}catch(Exception e){append("已配對讀取失敗："+e);}
-    }
-    private void manual(boolean classic){try{
-        BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
-        BluetoothDevice d=ad.getRemoteDevice(mac.getText().toString().trim().toUpperCase(java.util.Locale.US));
-        if(classic)connectSpp(d);else connect(d,d.getAddress());
-    }catch(Exception e){append("手動連線錯誤："+e);}}
-    private void connectSpp(BluetoothDevice d){
-        stopScan();closeSpp();reset();if(gatt!=null){gatt.close();gatt=null;}
-        final int token=sppToken;if(connectionLabel!=null)connectionLabel.setText("SPP 連線中…");append("SPP 連線中："+d.getAddress());
-        new Thread(()->{android.bluetooth.BluetoothSocket local=null;try{
-            local=d.createRfcommSocketToServiceRecord(UUID.fromString("00001101-0000-1000-8000-00805f9b34fb"));
-            if(token!=sppToken){local.close();return;} spp=local;local.connect();
-            if(token!=sppToken){local.close();return;}
-            handler.post(()->{if(token==sppToken){append("SPP 已連線");if(connectionLabel!=null)connectionLabel.setText("SPP 已連線");sppTest.setEnabled(true);sppPrint.setEnabled(true);sppTestA.setEnabled(true);extraEnabled(true);}});
-            byte[] buf=new byte[1024];int n;while((n=local.getInputStream().read(buf))!=-1){if(token!=sppToken)break;byte[] received=java.util.Arrays.copyOf(buf,n);append("SPP RX: "+hex(received));if(replies.size()<256)replies.offer(received);}
-        }catch(Exception e){if(token==sppToken)append("SPP 錯誤："+e);}finally{if(local!=null)try{local.close();}catch(Exception ignored){}handler.post(()->{if(token==sppToken)closeSpp();});}}).start();
-        handler.postDelayed(()->{if(token==sppToken && (spp==null || !spp.isConnected())){append("SPP 連線逾時");closeSpp();}},20000);
-    }
-    private void sppProbe(){sppSend(false,false);}
-    private void sppSend(boolean print, boolean protocolA){
-        final android.bluetooth.BluetoothSocket sock=spp; final int token=sppToken;
-        if(sock==null || !sock.isConnected() || sppBusy)return;
-        sppBusy=true; extraEnabled(false);sppTest.setEnabled(false);sppTestA.setEnabled(false);sppPrint.setEnabled(false);
-        new Thread(()->{try{
-            java.io.OutputStream out=sock.getOutputStream();
-            if(!print){byte[] f=frame(protocolA,protocolA?0xa1:0xa3,0);out.write(f);out.flush();append("SPP TX: "+hex(f)+"；等待回傳");Thread.sleep(5000);}
-            else {
-                append("SPP B：開始單張測試，240 列，請觀察出紙");
-                java.util.ArrayList<byte[]> frames=new java.util.ArrayList<>();
-                frames.add(frame(false,0xa3,0));
-                frames.add(frame(false,0xa6,0xaa,0x55,0x17,0x38,0x44,0x5f,0x5f,0x5f,0x44,0x38,0x2c));
-                frames.add(frame(false,0xbe,0));
-                for(byte[] row:raster()){int[] v=new int[48];for(int i=0;i<48;i++)v[i]=row[i]&255;frames.add(frame(false,0xa2,v));}
-                frames.add(frame(false,0xa6,0xaa,0x55,0x17,0,0,0,0,0,0,0,0x17));
-                frames.add(frame(false,0xa3,0));
-                int total=0;for(byte[] f:frames){if(token!=sppToken || !sock.isConnected())return;out.write(f);out.flush();total+=f.length;Thread.sleep(30);}
-                append("SPP B TX 完成："+total+" bytes；請確認實際出紙，勿連續重按");Thread.sleep(5000);
-            }
-        }catch(Exception e){if(token==sppToken)append("SPP TX 錯誤："+e);}finally{handler.post(()->{if(token==sppToken){sppBusy=false;boolean ok=spp==sock && sock.isConnected();sppTest.setEnabled(ok);sppTestA.setEnabled(ok);sppPrint.setEnabled(ok);extraEnabled(ok);}});}}).start();
-    }
-
-    private final Set<String> seen = new HashSet<>();
-    private static final int PERMISSION_REQUEST = 271;
-
-    private TextView connectionLabel;
-    private boolean pendingPrinterConnect;
-    private void connectPrinter(){
-        if(!hasPermissions()){
-            pendingPrinterConnect=true;
-            if(Build.VERSION.SDK_INT>=31) requestPermissions(new String[]{Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT},PERMISSION_REQUEST);
-            else requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},PERMISSION_REQUEST);
-            return;
-        }
-        try {
-            BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
-            if(ad==null || !ad.isEnabled()){append("請開啟藍牙");return;}
-            connectSpp(ad.getRemoteDevice("00:00:00:33:41:C0"));
-        }catch(Exception e){append("連線錯誤："+e);}
-    }
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
-        LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout controls=new LinearLayout(this);controls.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(20,20,20,20);
-        root.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(20,20+i.getSystemWindowInsetTop(),20,20+i.getSystemWindowInsetBottom());return i;});
-        TextView title=new TextView(this);title.setTextSize(22);title.setText("阿南直印 V7 — AQ-V268");root.addView(title);
-        connectionLabel=new TextView(this);connectionLabel.setTextSize(17);connectionLabel.setText("尚未連線");root.addView(connectionLabel);
-        button(root,"一鍵 SPP 連線 AQ-V268",this::connectPrinter);
-        button(root,"停止傳送／斷線",()->{stopScan();closeSpp();reset();if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;}append("已停止；已送出的資料可能仍會列印。");});
-        ScrollView outer=new ScrollView(this);outer.addView(controls);root.addView(outer,new LinearLayout.LayoutParams(-1,0,1));
-        extra(controls,"① SPP A：握手後列印",0);extra(controls,"② SPP TSPL：測試一張",1);extra(controls,"③ SPP CPCL：測試一張",2);extra(controls,"④ SPP ESC/POS：短文字",3);
-        sppPrint=button(controls,"⑤ SPP B：直接列印一張",()->sppSend(true,false));sppPrint.setEnabled(false);
-        sppTestA=button(controls,"SPP 狀態測試 A",()->sppSend(false,true));sppTestA.setEnabled(false);
-        sppTest=button(controls,"SPP 狀態測試 B",this::sppProbe);sppTest.setEnabled(false);
-        a=button(controls,"BLE A",()->print(true));b=button(controls,"BLE B",()->print(false));q=button(controls,"BLE 狀態",()->{});
-        a.setVisibility(View.GONE);b.setVisibility(View.GONE);q.setVisibility(View.GONE);
-        devices=new LinearLayout(this);
-        button(root,"複製全部紀錄",()->((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("SPP",status.getText())));
-        status=new TextView(this);status.setTextSize(14);status.setText("V7：請先連線 AQ-V268，再逐一測試。\n");
-        ScrollView log=new ScrollView(this);log.addView(status);root.addView(log,new LinearLayout.LayoutParams(-1,0,1));
-        setContentView(root);root.requestApplyInsets();refresh();
-    }
-
-    private void append(String message) {
-        runOnUiThread(() -> status.append(message + "\n"));
-    }
-
-    private boolean hasPermissions() {
-        if (Build.VERSION.SDK_INT >= 31) {
-            return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-                && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
-        }
-        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private void checkAndScan() {
-        if (!hasPermissions()) {
-            if (Build.VERSION.SDK_INT >= 31) requestPermissions(new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT}, PERMISSION_REQUEST);
-            else requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, PERMISSION_REQUEST);
-            return;
-        }
-        startScan();
-    }
-
-    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == PERMISSION_REQUEST) {
-            if (hasPermissions()) { if(pendingPrinterConnect){pendingPrinterConnect=false;connectPrinter();}else startScan(); }
-            else append("請允許附近裝置／位置權限，才能搜尋 BLE 裝置。");
-        }
-    }
-
-    private BluetoothAdapter scanAdapter;
-    private boolean receiverRegistered;
-    private final Runnable scanTimeout = this::stopScan;
-    private void found(BluetoothDevice device, String advertised, int rssi, String type) {
-        handler.post(() -> {
-            if (!scanning) return;
-            String address = device.getAddress();
-            String name = advertised;
-            if (name == null || name.isEmpty()) name = device.getName();
-            if (name == null || name.isEmpty()) name = "未命名裝置";
-            if (!seen.add(type + address)) return;
-            final String label = name + " / " + type + " / " + address + " / RSSI " + rssi;
-            append(label);
-            Button item = new Button(this);
-            item.setAllCaps(false); item.setText(label);
-            item.setOnClickListener(v -> {if(type.equals("Classic"))connectSpp(device);else connect(device,label);});
-            devices.addView(item);
-        });
-    }
-    private final android.content.BroadcastReceiver discovery = new android.content.BroadcastReceiver() {
-        @Override public void onReceive(Context c, android.content.Intent i) {
-            if (BluetoothDevice.ACTION_FOUND.equals(i.getAction())) {
-                BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                if(d != null) found(d,null,i.getShortExtra(BluetoothDevice.EXTRA_RSSI,(short)0),"Classic");
-            }
-        }
-    };
-    private final ScanCallback callback = new ScanCallback() {
-        @Override public void onScanResult(int t, ScanResult r) {
-            found(r.getDevice(),r.getScanRecord()==null?null:r.getScanRecord().getDeviceName(),r.getRssi(),"BLE");
-        }
-        @Override public void onScanFailed(int code) { append("BLE 搜尋失敗："+code); }
-    };
-    private void startScan() {
-        BluetoothManager manager = (BluetoothManager)getSystemService(Context.BLUETOOTH_SERVICE);
-        scanAdapter = manager == null ? null : manager.getAdapter();
-        if(scanAdapter == null || !scanAdapter.isEnabled()) { append("請開啟藍牙"); return; }
-        stopScan(); seen.clear(); devices.removeAllViews(); paired(); scanning=true;
-        append("V6：搜尋所有裝置，請保持畫面開啟");
-        try {
-            scanner=scanAdapter.getBluetoothLeScanner();
-            if(scanner!=null) scanner.startScan(null,new android.bluetooth.le.ScanSettings.Builder().setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(),callback);
-            else append("BLE 掃描器不可用");
-        } catch(Exception e){append("BLE 錯誤："+e);}
-        handler.postDelayed(classicStart,15000);
-        handler.postDelayed(scanTimeout,30000);
-    }
-    private void startClassic(){
-            if(!scanning)return;
-            try {
-                if(scanner!=null)scanner.stopScan(callback);
-                android.content.IntentFilter f=new android.content.IntentFilter(BluetoothDevice.ACTION_FOUND);
-                if(Build.VERSION.SDK_INT>=33)registerReceiver(discovery,f,Context.RECEIVER_EXPORTED); else registerReceiver(discovery,f);
-                receiverRegistered=true;
-                append("傳統藍牙搜尋啟動："+scanAdapter.startDiscovery());
-            } catch(Exception e){append("傳統藍牙錯誤："+e);}
-
-    }
-    private void stopScan() {
-        if(!scanning)return;
-        scanning=false; handler.removeCallbacks(scanTimeout); handler.removeCallbacks(classicStart);
-        try {if(scanner!=null)scanner.stopScan(callback);}catch(Exception ignored){}
-        try {if(scanAdapter!=null)scanAdapter.cancelDiscovery();}catch(Exception ignored){}
-        if(receiverRegistered){unregisterReceiver(discovery);receiverRegistered=false;}
-        append("搜尋結束，裝置紀錄數："+seen.size()+"；請點選裝置連線（支援 SPP 多協定測試）。");
-    }
-    private void connect(BluetoothDevice device, String label) {
-        stopScan();
-        closeSpp();
-        reset();
-        if (gatt != null) { gatt.close(); gatt = null; }
-        append("正在連接：" + label);
-        try { gatt = device.connectGatt(this, false, new BluetoothGattCallback() {
-            @Override public void onConnectionStateChange(BluetoothGatt connection, int statusCode, int newState) {
-                append("連線狀態：" + newState + "，狀態碼：" + statusCode);
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    try { append("服務探索啟動："+connection.discoverServices()); } catch (Exception e) { append("服務探索錯誤：" + e.getMessage()); }
-                }
-                if (newState == BluetoothProfile.STATE_DISCONNECTED) handler.post(() -> {if(connection==gatt){reset();append("已斷線。");}});
-            }
-            @Override public void onServicesDiscovered(BluetoothGatt connection, int statusCode) {
-                append("BLE 服務探索完成，狀態碼：" + statusCode);
-                if (statusCode != BluetoothGatt.GATT_SUCCESS) return;
-                for (BluetoothGattService service : connection.getServices()) {
-                    append("服務：" + service.getUuid());
-                    for (BluetoothGattCharacteristic c : service.getCharacteristics()) {
-                        append("  特徵：" + c.getUuid() + "，屬性：" + c.getProperties());
-                    }
-                }
-                handler.post(() -> setup(connection));
-            }
-            @Override public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor d,int code){handler.post(() -> {if(g!=gatt)return; ready=code==0; refresh(); append("通知訂閱狀態："+code);});}
-            @Override public void onCharacteristicChanged(BluetoothGatt g,BluetoothGattCharacteristic c){byte[] v=c.getValue().clone();handler.post(() -> {if(g==gatt) receive(v);});}
-            @Override public void onCharacteristicWrite(BluetoothGatt g,BluetoothGattCharacteristic c,int code){handler.post(() -> {if(g!=gatt || !waiting)return; waiting=false; if(code!=0){fail("寫入錯誤 "+code);return;} handler.postDelayed(MainActivity.this::pump,25);});}
-        }, BluetoothDevice.TRANSPORT_LE); } catch (Exception e) { append("連線失敗：" + e.getMessage()); }
-    }
-
-    private Button button(LinearLayout root,String label,Runnable task){Button v=new Button(this);v.setText(label);v.setMinHeight(0);v.setMinimumHeight(0);v.setTextSize(13);v.setOnClickListener(w->task.run());root.addView(v);return v;}
-    private void refresh(){a.setEnabled(ready && !busy && data!=null);b.setEnabled(ready && !busy);q.setEnabled(ready && !busy);}
-    private void reset(){generation++;ready=false;busy=false;waiting=false;paused=false;stage=0;queue.clear();tx=null;data=null;refresh();}
-    private void fail(String reason){append(reason+"；請斷線後重試。");reset();}
-    private void setup(BluetoothGatt g){if(g!=gatt)return; BluetoothGattService svc=g.getService(uuid(0xae30));if(svc==null)svc=g.getService(uuid(0xaf30));if(svc==null){append("找不到列印服務 AE30/AF30");return;}
-        tx=svc.getCharacteristic(uuid(0xae01));data=svc.getCharacteristic(uuid(0xae03));BluetoothGattCharacteristic rx=svc.getCharacteristic(uuid(0xae02));
-        if(tx==null || rx==null){append("缺少 AE01/AE02");return;} BluetoothGattDescriptor d=rx.getDescriptor(uuid(0x2902));
-        if(d==null || !g.setCharacteristicNotification(rx,true)){append("無法訂閱通知");return;}d.setValue((rx.getProperties()&16)!=0?BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE:BluetoothGattDescriptor.ENABLE_INDICATION_VALUE);if(!g.writeDescriptor(d))append("通知設定失敗");}
-    private static byte[] frame(boolean a,int cmd,int... payload){byte[] f=new byte[payload.length+8];f[0]=(byte)(a?0x22:0x51);f[1]=(byte)(a?0x21:0x78);f[2]=(byte)cmd;f[4]=(byte)payload.length;f[5]=(byte)(payload.length>>8);int crc=0;for(int i=0;i<payload.length;i++){f[i+6]=(byte)payload[i];crc^=payload[i]&255;for(int j=0;j<8;j++)crc=((crc<<1)^((crc&128)!=0?7:0))&255;}f[f.length-2]=(byte)crc;f[f.length-1]=(byte)255;return f;}
-    private String hex(byte[] v){StringBuilder s=new StringBuilder();for(byte x:v)s.append(String.format(java.util.Locale.US,"%02X ",x&255));return s.toString();}
-    private void begin(BluetoothGattCharacteristic c){generation++;busy=true;channel=c;refresh();}
-    private void add(byte[] v){for(int i=0;i<v.length;i+=20)queue.add(java.util.Arrays.copyOfRange(v,i,Math.min(i+20,v.length)));}
-    private void deadline(){int token=generation;handler.postDelayed(()->{if(token==generation && busy)fail("等待逾時");},45000);}
-    private void pump(){if(!busy || waiting || paused)return;if(queue.isEmpty()){if(stage==3){stage=4;channel=tx;add(frame(true,0xad,0));pump();return;}if(stage!=0)return;busy=false;refresh();append("傳輸結束，請確認紙張實際輸出。");return;}
-        byte[] v=queue.remove();int props=channel.getProperties();channel.setWriteType((props&4)!=0?BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE:BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);channel.setValue(v);waiting=true;try{if(!gatt.writeCharacteristic(channel)){waiting=false;fail("無法送出資料");return;}}catch(Exception e){fail(e.toString());return;}
-        int token=generation;handler.postDelayed(()->{if(token==generation && busy && waiting) { /* overall deadline handles stalled callback */ }},1000);}
-    private byte[][] raster(){Bitmap bm=Bitmap.createBitmap(384,240,Bitmap.Config.ARGB_8888);Canvas c=new Canvas(bm);c.drawColor(Color.WHITE);Paint p=new Paint(3);p.setColor(Color.BLACK);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(34);c.drawText("阿南檳榔",160,55,p);c.drawText("藍牙直印測試",160,105,p);p.setTextSize(30);c.drawText("AQ-V268",160,155,p);c.drawText("40 x 30 mm",160,200,p);byte[][] rows=new byte[240][48];for(int y=0;y<240;y++)for(int x=0;x<320;x++)if(Color.red(bm.getPixel(x,y))<128)rows[y][x/8]|=1<<(x%8);bm.recycle();return rows;}
-    private void print(boolean a){if(!ready || busy)return;begin(tx);deadline();append("開始協定 "+(a?"A":"B")+" 測試，320x240 內容／384 點資料列");if(a){stage=1;add(frame(true,0xa1,0));}else{add(frame(false,0xa3,0));add(frame(false,0xa6,0xaa,0x55,0x17,0x38,0x44,0x5f,0x5f,0x5f,0x44,0x38,0x2c));add(frame(false,0xbe,0));for(byte[] row:raster()){int[] v=new int[48];for(int i=0;i<48;i++)v[i]=row[i]&255;add(frame(false,0xa2,v));}add(frame(false,0xa6,0xaa,0x55,0x17,0,0,0,0,0,0,0,0x17));add(frame(false,0xa3,0));}pump();}
-    private void receive(byte[] v){append("RX: "+hex(v));if(v.length<9)return;int cmd=v[2]&255;if(v[0]==0x51 && v[1]==0x78 && cmd==0xae){int flags=v[6]&255;if((flags&15)!=0){fail("印表機回報可能異常");return;}paused=(flags&16)!=0;if(!paused)pump();}if(v[0]!=0x22 || v[1]!=0x21 || !busy)return;
-        if(stage==1 && cmd==0xa1){if(v.length<21 || v[12]!=0 || v[18]!=0){fail("A 狀態未確認就緒");return;}stage=2;add(frame(true,0xa9,240,0,48,0));pump();}
-        else if(stage==2 && cmd==0xa9){if(v[6]!=0){fail("A 啟動被拒絕");return;}stage=3;channel=data;for(byte[] row:raster())add(row);pump();}
-        else if(stage==4 && cmd==0xaa){stage=0;append("收到 A 完成通知，請確認實物。");pump();}}
-    @Override protected void onDestroy() {
-        stopScan();
-        closeSpp();
-        reset();
-        if (gatt != null) { gatt.disconnect(); gatt.close(); gatt = null; }
-        super.onDestroy();
-    }
+ private volatile BluetoothSocket socket;
+ private volatile int token;
+ private boolean busy;
+ private TextView log, state;
+ private Button print, query;
+ private static final String MAC="00:00:00:33:41:C0";
+ private static final byte[] STATUS={0x3a,0x5a,0,0,0,0,0,0x5a};
+ private static final byte[] STATUS2={0x3a,0x5a,0,0,0,0,0,0x0a};
+ private static final String[] PACKETS={
+  "OijwAIAlABU=",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAAAAAPAAAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAADwAA8AAAAAHwAAAAAADwAAAAAADwAAAAAAAAAAAAAAAAAAAAAAAAAA8AAPAAAAAB4AAAAAAA8AAAAAAA8AAAAAAAAAAAAAAAAAAAAAAAAAAPAADwAAAAA+AAAAAAAPAAAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAADwAA8AAAAAPAAAAAAADwAAAAAADwAAAAAAAAAAAAAAAAAAAAAAAAA88AAPAAAAAHwAAAAAAA8AAAAAAA8AAAAAAAAAAAAAAAAAAAAAAAAAPPAADwAAAAB8AAAAAAAPAAAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAADzwH///gA/////+AAAADwAAAAAADwAAAAAAAAAAAAAAAAAAAAAAAAA48B///4AP/////wAAAA8AAAAAAA8AAAAAAAAAAAAAAAAAAAAAAAAAOPAf//+AD/////8AAAAPAAAAAAAPAAAAAAAAAAAAgAAABwAAAAAAADjwH///gA/////+AAAADwAAAAAADwAAAAAAcABwAeAAAAcAAA8AAAB//wAPAAAPAAAADgAAAA8AAAAAAA8AAAAAAOAAeAPAAAAHAAAHAAAAf/8ADwAADwAAAA4Af//////gf//////gAAHgADwDgAAABwAAA4AAAH//AA8AAA8AAAAOAH//////4H//////4AADwD///7+AAAcAAAPAAAB//wAPAAAPAAAADgB//////+B//////+AAA4A/////gAAHAAABwAAAePAADwAADwAAAA4Af//////gf//////gAAeAP////4AA",
+  "BwAAAeAAAHDwf///8A8AAAAOACAAHwAAQCAAHwAAQAAHAAAODgAAAAcAAADgAABw8P////APAAAADgAAAA8AAAAAAA8AAAAADwAGDg4MAAAHAAAA8AAA8PD////wDwAAAA4AAAAf",
+  "AAAAAAAfAAAAAA8ABw4OHgAABwAAAHAAAPDwf///8A8AAAAOAAAAH4AAAAAAH4AAAAAOAAeODjwD/////gB4AADw8AAAOAAPAAAADgAAAB+AAAAAAB+AAAAADgADzg54A/////4AeAAA8PAAADgADwAAAA4AAAAfgAAAAAAfgAAAAB4AAc4OcAP////+AHgAACDwAAA4AA/////+AAAAP8AAAAAAP8AAAAAeAACODiAAAAcAAAA4AAAA/wAAOAAP/////gAAAD/AAAAAAD/AAAAAHAB/////wAAHAAAAOAAAAP8AADgAD/////4AAAB/4AAAAAB/4AAAABwAf////+AAD4AAADgAAAP/P///4A/////+AAAAfeAAAAAAfeAAAAAcAH/////gAA+AAAA8AAAf/z///+APAAAADgAAAPnwAAAAAPnwAAAAHAAAAAAAAAAPwAAAPAAA//g////gDwAAAA4AAAD48AAAAAD48AAAABwAAAAAAAAAH8AAADwAAP/wP///4A8AAAAOAAAB8PgAAAAB8PgAAAAcAAAAAAAAAB/AAAA8AAD+8AAAOAAPAAAADgAAA/B8AAAAA/B8AAAAHAAD///8AAA84AAAPAAA+PAGADgADwAAAA4AAAfgPgAAAAfgPgAAABwAA////AAAPPAAADgAAEDwDwA4AA8AAAAOAAAHwD4AAAAHwD4AAAAeAAOAADwAAHhwAAA4AAAA8B+APAAPAAAADgAAD4AfAAAAD4AfAAAAHgADgAAcAADweAAAOAAAAPAPwDwADwAAAA4AAB+AD4AAAB+AD4AAAB4AA4AAHAAB8DwAAHgAAADwB+A8AA8AAAAOAAB/AAfgAAB/AAfgAAAOAAP///wAA+AeAAB4AAAA",
+  "8APwPAAPAAAADgAA/gAD8AAA/gAD8AAADgAD///8AAfAHwAAcAAAAPAB4DwADwAAAA4AAfwAAfgAAfwAAfgAAA8AA////AAPgA+AAPAAAADwAMA8AA8AAAAOAAf4AAD+AAf4AAD+",
+  "AAAHAAOAABwAHwAH4ADwAAAA8AAAeAAP/////gAP4AAAfwAP4AAAfwAAB4ADgAAcAH4AA/AA4AAAAPAAAHgAD/////4AP8AAAD/AP8AAAD/AAAOAA4AAPAD8AAD8AeAAAADwAD/4AA/////+AH+AAAAf8H+AAAAf8AADwAP///wD+AAAfgHAAAAA8AA/+AAPv///3wB/AAAAB+B/AAAAB+AAAcAD///8A+AAAD4DwAAAAPAAP/AADwAAAA8APAAAAAPgPAAAAAPgAAHgA4AAPAHAAAAOB4AAAADwAD/gAA8AAAAPADgAAAAAwDgAAAAAwAAA8AOAABwAAAAABAcAAAAAcAAAAAAHAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAAAAAAAOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAGAAH+AAAD/AAAAAA//gAAAP8AAAP4///wAAAAAAAAAAAAAA/gAD///gAP/4AAH/8AAAAA//+AAAD+AAAH8P///AAAAAAAAAAAAAAf4AA///4AH//AAD//gAAAAf//wAAB/AAAB/D///8AAAA",
+  "AAAAAAAAAf+AAP//+AD//4AB//8AAAAP//+AAA/wAAAfw////gAAAAAAAAAAAAf/gAD///gB///AA///gAAAH///gAAP4AAAP4P///8AAAAAAAAAAAAf/4AA///4A///4Af//8AA",
+  "AB/4/8AAH+AAAD+D////gAAAAAAAAAAAP/+AAP//+AP+P/AH/H/gAAA/wD/AAB/AAAA/A/AB/4AAAAAAAAAAAP//gAD8AAAH+A/wD/Af4AAAP4Af4AA/wAAAfwPwAH/AAB+AAAAAAAH//4AB/AAAB/AH+A/gD/AAAH8AD+AAP4AAAH8D8AA/wAAfgAAAAAAB/7+AAfwAAA/wA/gf4AfwAAB/AA/gAH+AAAB+A/AAH8AAH4AAAAAAAf4/gAH8AAAP4AP4H8AH8AAAPgAP4AB/AAAA/gPwAB/AAB+AAAAAAAH8P4AB/AAAD+AD/B/AB/gAAA4AD+AA/wAAAP4D8AAfwAAfgAAAAAAB8D+AAfwAAB/gAfw/wAP4AAAGAA/gAP4AAAH8A/AAH8AAH4AAAAAAAcA/gAH4AAAfwAH8P4AD+AAAAAAP4AH8AAAB/APwAB/AAB+AAAAAAAGAP4AB+AAAH8AB/D+AA/gAAAAAD+AB/AAAAfgD8AA/wAAfgAAAAAAAAD+AAfjwAB/AAfw/gAP4AAAAAA/gA/gAAAP4A/AAP8AAH4AAAAAAAAA/gAP//gAfwAH8P4AD+AAAAAAfwAf4fwAD+APwAP/AAB+AAAAAAAAAP4AD//+AH8AB/j+AA/wAAAAAP8AH8H8AA/AD////gAAfgAAAAAAAAD+AA///4B/AAP4/gAH8AAAAAD/AD/B/AAfwA////wD////wAAAAAAA/gAP///AfwAD+P4AB/AAAAAB/gA/gfwAH8AP///4A////8AAAAAAAP4AD///wH8AA/j+AAfwAAAAA/wAf4H8AD+AD////gP////AAAAAAAD+AA///+B/AAP4/gAH8AAAAAf8AH8B/AA/gA////8D////wAAAAAAA/",
+  "gAP8B/wfwAD+P4AB/AAAAAP+AD/AfwAPwAP////g////8AAAAAAAP4AH8AP8H8AA/j+AAfwAAAAH/AA/gH8AH8AD+AH/8P////AAAAAAAD+AA+AB/B/AAP4/gAH8AAAAB/gAfwB/",
+  "AB/AA/AAH/AAH4AAAAAAAAA/gADgAf4fwAD+P4AB/AAAAA/4AH8AfwAfgAPwAA/wAB+AAAAAAAAAP4AAAAD+H8AB/j+AA/wAAAAf8AD+AH8AP4AD8AAH+AAfgAAAAAAAAD+AAAAA/h/AAfw/gAP4AAAAP+AA/////D+AA/AAB/gAH4AAAAAAAAA/gAAAAP4fwAH8P4AD+AAAAH/AAf////x/AAPwAAP4AB+AAAAAAAAAP4AAAAD+H8AB/D+AA/gAAAD/gAH////8fwAD8AAD+AAfgAAAAAAAAD+AAAAA/h/AAfw/gAP4AAAB/wAB/////H4AA/AAA/gAH4AAAAAAAAA/gAAAAP4P4AH8H8AD+AAAA/4AAf////z+AAPwAAP4AB+AAAAAAAAAP4AA4AD+D+AD/B/AB/gAAAf8AAH////8/gAD8AAH+AAfgAAAAAAAAD+AA+AB/g/gA/gfwAfwAAAP+AAAAAB/APwAA/AAD/AAH4AAAAAAAAA/gAfwAfwP8Af4H+AP8AAAD/AAAAAAfwH8AAPwAB/wAB+AAAAAAAAAP4AH8AP8B/gH8A/wD+AAAB/gAAAAAH8B/AAD8AB/4AAAAAAAAAAAAD+AB/wH+Af8D/AP+B/gAAA////4AAB/A/gAA////+AAAAAAAAAAAAA/gAP///gD///gB///wAAAf///8AAAfwP4AAP////AAAAAAAAAAAAAP4AD///wA///4Af//8AAAH////AAAH8D8AAD////gAAAAAAAAAAAAD+AAf//4AH//8AD//+AAAB////wAAB/B/AAA////wAAAAAAAAAAAAA/gAD//8AA//+AAf//AAAAf///8AAAfwfwAAP///wAAAAAAAAAAAAAP4AAf/+AAH//",
+  "AAD//gAAAH////gAAH8P4AAD///gAAAAAAAAAAAAAD+AAB/+AAAf/AAAP/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8AAAA+AAAAfAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfgAAPgAAAAAAAAAH8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH8AAD4AAAAAAAAAB/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/AAA+AAAAAAAAAAfwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP4AAPgAAAAAAAAAH4AAAAAADgAAAAAAAAAAAAAAAAAAAAAAAAAAAAB+AAD4AAAAAAAAAB+AAAAAAB8AH///////AAAAAAAAAAAAAAAAAAAAfwAA+AAAAAAAAAAfgAAAAAA/AB///////wAAAAAAAAAAAAAAAAAAAD8AAPgAAAAAAAAAH4AAAAAAf4Af//////8AAAAAAAAAAAAAAAAAD/////D////4AAAAAB+AAAAAAD/AH///////AAAAAAAAAAAAAAAAAA/////w////+AAAAAAfgAAAAAAf4B+f8/H/PwAAAAAAAAAAAAAAAAAP////8P////gA//////////gAD/AfAAHwAD8AAAAAAAAAAAAAAAAAD/////D////4AP/////////4AAf4HwAB8AA/AAAAAAAAAAAAAAAAAA/////w////8AD/////////+AAD/B8AAfAAPwAAAAAAAAAAAAAAAAAAfAB",
+  "8APgAAAAA//////////gAAf4fAAHwAD8AAAAAAAAAAAAAAAAAAH4AeAD4AAAAAP/////////4AAD/HwAB8AA/AAAAAAAAAAAAAAAAAAA+APgA+AAAAAD/////////+AAA/x//+/f",
+  "//wAAAAAAAAAAAAAAAAAAPgD4APgAAAAAAAAAH4AAAAAAAH4f//////8AAAAAAAAAAAAAAAAAAD4A+AD4AAAAAAAAAB+AAAAAAAA8Af/////wAAAAAAAAAAAAAAAAAAA/AfAA////gAAAAAAfgAAAAAAAGAH/////8AAAAAAAAAAAAAAAAAAAHwHwAP///4AAAAwAH4ADwAAAAAAB//////AAAAAAAAAAAAAAAAAAAB8B8AD///+AAAAfgB+AA/AAAAAAAAAB8AAAAAAAAAAAAAAAAAAAABwfg/A4////gAAAH4AfgAfgAAAAAAAAAfAAAAAAAAAAAAAAAAAAAAA/////+AAAH4AAAB+AH4AH4AAAAAAAAAHwAAAAAAAAAAAAAAAAAAAAP/////gAAA+AAAA/AB+AD+AAAAAAAAAB8AAAAAAAAAAAAAAAAAAAAD/////4AAAPgAAAPwAfgA/AAAAAAAP/////8AAAAAAAAAAAAAAAAAA/////+AAAD4AAAD8AH4AfwAAAAAAD//////AAAAAAAAAAAAAAAAAAHAAAADgAAA+AAAB+AB+AH4AAAAAAA//////wAAAAAAAAAAAAAAAAAAAAAAAB////gAAAfwAfgD/AAAH//AP/////8AAAAAAAAAAAAAAAAAAAAAAAAf///4AAAP+AH4A/4AAB//wD8AHwAfAAAAAAAAAAAAAAAAAAAAAAAAH///+AAAH/wB+Af/AAAf/8A/AB8AHwAAAAAAAAAAAAAAAAAAAAAAAB////gAAB/+AfgP/4AAH//APwAfAB8AAAAAAAAAAAAAAAAAAB////gf///4AAA//wH4D//AAB//wD8AHwAfAAAAAAAAAAAAAAAAAAAf///4H4AAAAAAf",
+  "z+B+B/f4AAf/8A//////wAAAAAAAAAAAAAAAAAAH///+B+AAAAAAH8fwfg/j/AAAA/AP/////8AAAAAAAAAAAAAAAAAAB////gfgAAAAAD+D+H4f4f4AAAPwD//////AAAAAAAAA",
+  "AAAAAAAAAAf///4H4AAAAAB/Afh+H8D/AAAD8A//////wAAAAAAAAAAAAAAAAAAHwAB+B////gAA/wH4fw+Af4AAA/APwAfAB8AAAAAAAAAAAAAAAAAAB8AAfgf///4AAf4A8H8HAD/AAAPwD8AHwAfAAAAAAAAAAAAAAAAAAAfAAH4H///+AAP8AHD/ggAf4AAD8A/AB8AHwAAAAAAAAAAAAAAAAAAHwAB+B////gAD+AAh/8AAD+AAA/APwAfAB8AAAAAAAAAAAAAAAAAAB8AAfgfgAAAAAfAAA//gAAfAAAPwD8APwAfAAAAAAAAAAAAAAAAAAAf///4H4AAAAADgAAf/8AADgAAD8A//////wAAAAAAAAAAAAAAAAAAH///+B+AAAAAAQAAP//gAAQAAA/AP/////8AAAAAAAAAAAAAAAAAAB////gfgAAAAAAAAD//8AAAAAAPwD//////AAAAAAAAAAAAAAAAAAAf///4H///+AAAAAB///gAAAAAD8A//////wAAAAAAAAAAAAAAAAAAH4AB+B////gAAAAA//v8AAAAAA/AAAAfAAAAAAAAAAAAAAAAAAAAAB8AAfgf///4AAAAAf35/gAAAAAPwAAAHwAAAAAAAAAAAAAAAAAAAAAfAAH4H///+AAAAAf5+P8AAAAAD8AAAB8AAAAAAAAAAAAAAAAAAAAAHwAB+B+AADgAAAAP8fh/gAAAAA/AAAAfAAAAAAAAAAAAAAAAAAAAAB8AAfgfgAAAAAAAH+H4P+AAAAAPwf//////8AAAAAAAAAAAAAAAAAAfv/34H4AAAAAAAD/B+B/wAAAAD8H///////AAAAAAAAAAAAAAAAAAH///+B+AAAAAAAD/gfgP/AAAA",
+  "A/B///////wAAAAAAAAAAAAAAAAAB////gf///4AAAB/wH4B/4AAAAfwf//////8AAAAAAAAAAAAAAAAAAf///4H///+AAAA/4B+AH/gAAAP+H///////AAAAAAAAAAAAAAAAAAH",
+  "///+B////gAAA/8AfgA/8AAAH/wAAAfAAAAAAAAAAAAAAAAAAAAAB8AAfgf////gAA/8AH4AH/wAAD/+AAAHwAAAAAAAAAAAAAAAAAAAAAfAAH4H////8AAf+AB+AAf/AAB//wAAB8AAAAAAAAAAAAAAAAAAAAAHwAB+B+AAA/AAf/AAfgAD/8AAf3+AAAfAAAAAAAAAAAAAAAAAAAAAB8AAfgfgAAPgAf/AAH4AAf/wAP8/wAAHwAAAAAAAAAAAAAAAAAAAAAfAAH4H4AAD4Af/gAB+AAB//AH+H+AAB8AAAAAAAAAAAAAAAAAAAAAHwAB+B+AAA+Af/gAAfgAAH/wD/A/8AARAAAAAAAAAAAAAAAAAAAAAB8AAfgfwAAfgH/wAAH4AAA/4B/gH/4AAAAAAAAAAAAAAAAAAAAAAAAfAAH4D/AAP4A/wAAB+AAAD+A/wA////////4AAAAAAAAAAAAAAAAAHwHz+A////+APwAAAfgAAAPAH4AD///////+AAAAAAAAAAAAAAAAAB8B//gP////gB4AAAH4AAAAwB8AAf///////gAAAAAAAAAAAAAAAAAfgP/wB////wAYAAAB+AAAAAAeAAB///////wAAAAAAAAAAAAAAAAAH4D/8AP///4AAAAAAfgAAAAADgAAD//////8AAAAAAAAAAAAAAAAAB+A/+AAf//wAAAAAAH8AAAAAAwAAAA//////AAAAAAAAAAAAAAAAAAfgH8AAAAAAAAAAAAB/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+ };
+ private static final int[] DELAYS={0,30,0,30,0,30,0,30,0,29,0,29,0,30,0,31,0,28,0,30,0,29,0,31,0,29};
+ private void add(String s){runOnUiThread(()->log.append(s+"\n"));}
+ private Button button(LinearLayout l,String s,Runnable r){Button b=new Button(this);b.setText(s);b.setOnClickListener(v->r.run());l.addView(b);return b;}
+ public void onCreate(Bundle b){super.onCreate(b);LinearLayout l=new LinearLayout(this);l.setOrientation(1);l.setPadding(20,20,20,20);l.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(20,20+i.getSystemWindowInsetTop(),20,20+i.getSystemWindowInsetBottom());return i;});state=new TextView(this);state.setTextSize(22);l.addView(state);button(l,"一鍵連線 AQ-V268",this::connect);print=button(l,"直接列印 40×30 測試",()->send(true));query=button(l,"讀取印表機狀態",()->send(false));button(l,"停止／斷線",this::close);button(l,"複製全部紀錄",()->((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("V8",log.getText())));log=new TextView(this);ScrollView sc=new ScrollView(this);sc.addView(log);l.addView(sc,new LinearLayout.LayoutParams(-1,0,1));setContentView(l);state.setText("阿南直印 V8：尚未連線");enable(false);add("V8：重播實際擷取的單張標籤資料。請先關閉趣列印連線。");}
+ private void enable(boolean b){print.setEnabled(b);query.setEnabled(b);}
+ private void close(){token++;BluetoothSocket old=socket;socket=null;busy=false;enable(false);state.setText("V8：尚未連線");if(old!=null)try{old.close();}catch(Exception ignored){}}
+ private void connect(){if(Build.VERSION.SDK_INT>=31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},1);return;}close();final int id=token;state.setText("SPP 連線中");new Thread(()->{BluetoothSocket s=null;try{BluetoothAdapter a=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();if(a==null||!a.isEnabled())throw new IOException("請開啟藍牙");s=a.getRemoteDevice(MAC).createRfcommSocketToServiceRecord(UUID.fromString("00001101-0000-1000-8000-00805f9b34fb"));if(id!=token)return;socket=s;s.connect();if(id!=token)return;runOnUiThread(()->{if(id==token){state.setText("V8：SPP 已連線");enable(true);}});byte[] buf=new byte[1024];int n;while(id==token&&(n=s.getInputStream().read(buf))!=-1){StringBuilder h=new StringBuilder();for(int j=0;j<n;j++)h.append(String.format(java.util.Locale.US,"%02X ",buf[j]&255));add("RX: "+h);}}catch(Exception e){if(id==token)add("連線錯誤："+e);}finally{if(s!=null)try{s.close();}catch(Exception ignored){}runOnUiThread(()->{if(id==token)close();});}}).start();new Handler(Looper.getMainLooper()).postDelayed(()->{if(id==token&&(socket==null||!socket.isConnected())){add("連線逾時");close();}},20000);}
+ public void onRequestPermissionsResult(int r,String[] p,int[] g){super.onRequestPermissionsResult(r,p,g);if(r==1&&g.length>0&&g[0]==PackageManager.PERMISSION_GRANTED)connect();}
+ private void write(OutputStream o,byte[] b,int id)throws Exception{if(id!=token)throw new IOException("已停止");o.write(b);o.flush();}
+ private void send(boolean printing){BluetoothSocket s=socket;int id=token;if(s==null||!s.isConnected()||busy)return;busy=true;enable(false);new Thread(()->{try{OutputStream o=s.getOutputStream();write(o,STATUS,id);Thread.sleep(300);write(o,STATUS2,id);Thread.sleep(300);if(printing){int total=0;for(int i=0;i<PACKETS.length;i++){Thread.sleep(DELAYS[i]);byte[] v=android.util.Base64.decode(PACKETS[i],android.util.Base64.DEFAULT);write(o,v,id);total+=v.length;}add("列印資料已送出："+total+" bytes，請確認實際出紙");Thread.sleep(3000);write(o,STATUS2,id);}Thread.sleep(1500);}catch(Exception e){if(id==token)add("傳送錯誤："+e);}finally{runOnUiThread(()->{if(id==token){busy=false;enable(socket!=null&&socket.isConnected());}});}}).start();}
+ protected void onDestroy(){close();super.onDestroy();}
 }
