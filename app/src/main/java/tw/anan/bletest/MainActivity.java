@@ -50,10 +50,53 @@ public class MainActivity extends Activity {
     private volatile android.bluetooth.BluetoothSocket spp;
     private volatile int sppToken;
     private Button sppTest, sppPrint, sppTestA;
+    private final java.util.ArrayList<Button> extraSpp = new java.util.ArrayList<>();
+    private final java.util.concurrent.LinkedBlockingQueue<byte[]> replies = new java.util.concurrent.LinkedBlockingQueue<>();
+    private void extraEnabled(boolean enabled){for(Button v:extraSpp)v.setEnabled(enabled);}
+    private void extra(LinearLayout root,String label,int mode){Button v=button(root,label,()->sppExtra(mode));v.setEnabled(false);extraSpp.add(v);}
+    private void sppExtra(int mode){
+        final android.bluetooth.BluetoothSocket sock=spp; final int token=sppToken;
+        if(sock==null || !sock.isConnected() || sppBusy)return;
+        sppBusy=true; extraEnabled(false);sppTest.setEnabled(false);sppTestA.setEnabled(false);sppPrint.setEnabled(false);
+        new Thread(()->{try{
+            java.io.OutputStream out=sock.getOutputStream();
+            String[] names={"A","TSPL","CPCL","ESC/POS"};
+            append("SPP "+names[mode]+"：單次測試");
+            if(mode==0){
+                replies.clear(); sendChunk(out,frame(true,0xa1,0),token);
+                byte[] r=awaitA(0xa1,token);
+                if(r.length<21 || r[12]!=0 || r[18]!=0)throw new java.io.IOException("A 狀態未確認就緒");
+                sendChunk(out,frame(true,0xa9,240,0,48,0),token);
+                r=awaitA(0xa9,token);if(r.length<9 || r[6]!=0)throw new java.io.IOException("A 啟動未確認");
+                for(byte[] row:raster())sendChunk(out,row,token,false);
+                sendChunk(out,frame(true,0xad,0),token);
+                append("A 圖片資料 11520 bytes 已寫入，等待完成通知");
+                awaitA(0xaa,token);
+            }else{
+                byte[] payload;
+                if(mode==1)payload=("SIZE 40 mm,30 mm\r\nGAP 2 mm,0 mm\r\nCLS\r\nTEXT 24,40,\"3\",0,1,1,\"AQ-V268 TEST\"\r\nPRINT 1,1\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                else if(mode==2)payload=("! 0 200 200 240 1\r\nTEXT 4 0 24 40 AQ-V268 TEST\r\nFORM\r\nPRINT\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                else {java.io.ByteArrayOutputStream buf=new java.io.ByteArrayOutputStream();buf.write(new byte[]{27,64});buf.write("AQ-V268 TEST\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));buf.write(new byte[]{27,100,2});payload=buf.toByteArray();}
+                sendChunk(out,payload,token);append("TX 完成："+payload.length+" bytes；請觀察出紙");
+            }
+            Thread.sleep(5000);
+        }catch(Exception e){if(token==sppToken)append("SPP 測試錯誤："+e);}
+        finally{handler.post(()->{if(token==sppToken){sppBusy=false;boolean ok=spp==sock && sock.isConnected();extraEnabled(ok);sppTest.setEnabled(ok);sppTestA.setEnabled(ok);sppPrint.setEnabled(ok);extraEnabled(ok);}});}}).start();
+    }
+    private void sendChunk(java.io.OutputStream out,byte[] v,int token)throws Exception{sendChunk(out,v,token,true);}
+    private void sendChunk(java.io.OutputStream out,byte[] v,int token,boolean log)throws Exception{
+        if(log)append("SPP TX HEX: "+hex(v));
+        for(int i=0;i<v.length;i+=64){if(token!=sppToken)throw new java.io.IOException("已停止");out.write(v,i,Math.min(64,v.length-i));out.flush();Thread.sleep(30);}
+    }
+    private byte[] awaitA(int cmd,int token)throws Exception{
+        java.io.ByteArrayOutputStream buf=new java.io.ByteArrayOutputStream();long end=android.os.SystemClock.elapsedRealtime()+5000;
+        while(token==sppToken && android.os.SystemClock.elapsedRealtime()<end){byte[] part=replies.poll(200,java.util.concurrent.TimeUnit.MILLISECONDS);if(part==null)continue;buf.write(part);byte[] v=buf.toByteArray();int i=0;while(i+6<=v.length){if(v[i]!=0x22 || v[i+1]!=0x21){i++;continue;}int n=(v[i+4]&255)+((v[i+5]&255)<<8)+8;if(n>4096){i++;continue;}if(i+n>v.length)break;if((v[i+2]&255)==cmd && (v[i+n-1]&255)==255)return java.util.Arrays.copyOfRange(v,i,i+n);i+=n;}buf.reset();buf.write(v,i,v.length-i);}
+        throw new java.io.IOException("A 回傳逾時："+Integer.toHexString(cmd));
+    }
     private volatile boolean sppBusy;
     private android.widget.EditText mac;
     private final Runnable classicStart = this::startClassic;
-    private void closeSpp(){sppToken++; android.bluetooth.BluetoothSocket old=spp; spp=null; if(old!=null)try{old.close();}catch(Exception ignored){} sppBusy=false; if(sppTest!=null)sppTest.setEnabled(false); if(sppPrint!=null)sppPrint.setEnabled(false); if(sppTestA!=null)sppTestA.setEnabled(false);}
+    private void closeSpp(){sppToken++; android.bluetooth.BluetoothSocket old=spp; spp=null; if(old!=null)try{old.close();}catch(Exception ignored){} sppBusy=false; extraEnabled(false); if(sppTest!=null)sppTest.setEnabled(false); if(sppPrint!=null)sppPrint.setEnabled(false); if(sppTestA!=null)sppTestA.setEnabled(false);}
     private void paired(){
         if(!hasPermissions()) {checkAndScan();return;}
         BluetoothAdapter ad=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
@@ -79,16 +122,16 @@ public class MainActivity extends Activity {
             local=d.createRfcommSocketToServiceRecord(UUID.fromString("00001101-0000-1000-8000-00805f9b34fb"));
             if(token!=sppToken){local.close();return;} spp=local;local.connect();
             if(token!=sppToken){local.close();return;}
-            handler.post(()->{if(token==sppToken){append("SPP 已連線");sppTest.setEnabled(true);sppPrint.setEnabled(true);sppTestA.setEnabled(true);}});
-            byte[] buf=new byte[1024];int n;while((n=local.getInputStream().read(buf))!=-1){if(token!=sppToken)break;append("SPP RX: "+hex(java.util.Arrays.copyOf(buf,n)));}
+            handler.post(()->{if(token==sppToken){append("SPP 已連線");sppTest.setEnabled(true);sppPrint.setEnabled(true);sppTestA.setEnabled(true);extraEnabled(true);}});
+            byte[] buf=new byte[1024];int n;while((n=local.getInputStream().read(buf))!=-1){if(token!=sppToken)break;byte[] received=java.util.Arrays.copyOf(buf,n);append("SPP RX: "+hex(received));if(replies.size()<256)replies.offer(received);}
         }catch(Exception e){if(token==sppToken)append("SPP 錯誤："+e);}finally{if(local!=null)try{local.close();}catch(Exception ignored){}handler.post(()->{if(token==sppToken)closeSpp();});}}).start();
-        handler.postDelayed(()->{if(token==sppToken && !sppTest.isEnabled()){append("SPP 連線逾時");closeSpp();}},20000);
+        handler.postDelayed(()->{if(token==sppToken && (spp==null || !spp.isConnected())){append("SPP 連線逾時");closeSpp();}},20000);
     }
     private void sppProbe(){sppSend(false,false);}
     private void sppSend(boolean print, boolean protocolA){
         final android.bluetooth.BluetoothSocket sock=spp; final int token=sppToken;
         if(sock==null || !sock.isConnected() || sppBusy)return;
-        sppBusy=true; sppTest.setEnabled(false);sppTestA.setEnabled(false);sppPrint.setEnabled(false);
+        sppBusy=true; extraEnabled(false);sppTest.setEnabled(false);sppTestA.setEnabled(false);sppPrint.setEnabled(false);
         new Thread(()->{try{
             java.io.OutputStream out=sock.getOutputStream();
             if(!print){byte[] f=frame(protocolA,protocolA?0xa1:0xa3,0);out.write(f);out.flush();append("SPP TX: "+hex(f)+"；等待回傳");Thread.sleep(5000);}
@@ -104,7 +147,7 @@ public class MainActivity extends Activity {
                 int total=0;for(byte[] f:frames){if(token!=sppToken || !sock.isConnected())return;out.write(f);out.flush();total+=f.length;Thread.sleep(30);}
                 append("SPP B TX 完成："+total+" bytes；請確認實際出紙，勿連續重按");Thread.sleep(5000);
             }
-        }catch(Exception e){if(token==sppToken)append("SPP TX 錯誤："+e);}finally{handler.post(()->{if(token==sppToken){sppBusy=false;boolean ok=spp==sock && sock.isConnected();sppTest.setEnabled(ok);sppTestA.setEnabled(ok);sppPrint.setEnabled(ok);}});}}).start();
+        }catch(Exception e){if(token==sppToken)append("SPP TX 錯誤："+e);}finally{handler.post(()->{if(token==sppToken){sppBusy=false;boolean ok=spp==sock && sock.isConnected();sppTest.setEnabled(ok);sppTestA.setEnabled(ok);sppPrint.setEnabled(ok);extraEnabled(ok);}});}}).start();
     }
 
     private final Set<String> seen = new HashSet<>();
@@ -126,6 +169,7 @@ public class MainActivity extends Activity {
         sppTest=button(root,"SPP 狀態測試 B",this::sppProbe);sppTest.setEnabled(false);
         sppTestA=button(root,"SPP 狀態測試 A",()->sppSend(false,true));sppTestA.setEnabled(false);
         sppPrint=button(root,"SPP B：直接列印一張",()->sppSend(true,false));sppPrint.setEnabled(false);
+        extra(root,"SPP A：握手後列印",0);extra(root,"SPP TSPL：測試一張",1);extra(root,"SPP CPCL：測試一張",2);extra(root,"SPP ESC/POS：短文字",3);
         a = button(root,"A 趣列印協定：直接列印", () -> print(true));
         b = button(root,"B Cat 協定：直接列印", () -> print(false));
         q = button(root,"讀取狀態 A / B", () -> { if(!ready || busy) return; begin(tx); add(frame(true,0xA1,0)); add(frame(false,0xA3,0)); deadline(); pump(); });
@@ -133,14 +177,14 @@ public class MainActivity extends Activity {
         button(root,"停止傳送／斷線", () -> { stopScan(); closeSpp(); reset(); if(gatt!=null){gatt.disconnect();gatt.close();gatt=null;} append("已停止；已送出的資料可能仍會列印。"); });
         status = new TextView(this);
         status.setTextSize(15);
-        status.setText("AQ-V268 測試版：直印 V5，兩種實驗協定。\n請先在趣列印中斷開印表機連線。\n");
-        ScrollView log = new ScrollView(this); log.addView(status); root.addView(log,new LinearLayout.LayoutParams(-1,0,2));
+        status.setText("AQ-V268 測試版：直印 V6，多協定實驗。\n請先在趣列印中斷開印表機連線。\n");
+        ScrollView log = new ScrollView(this); log.addView(status); root.addView(log,new LinearLayout.LayoutParams(-1,600));
         ScrollView scroll = new ScrollView(this);
         devices = new LinearLayout(this);
         devices.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(devices);
-        root.addView(scroll, 4, new LinearLayout.LayoutParams(-1, 0, 2));
-        setContentView(root); refresh(); handler.post(this::paired);
+        root.addView(scroll, 4, new LinearLayout.LayoutParams(-1, 400));
+        ScrollView outer=new ScrollView(this);outer.addView(root);setContentView(outer); refresh(); handler.post(this::paired);
     }
 
     private void append(String message) {
@@ -210,7 +254,7 @@ public class MainActivity extends Activity {
         scanAdapter = manager == null ? null : manager.getAdapter();
         if(scanAdapter == null || !scanAdapter.isEnabled()) { append("請開啟藍牙"); return; }
         stopScan(); seen.clear(); devices.removeAllViews(); paired(); scanning=true;
-        append("V5：搜尋所有裝置，請保持畫面開啟");
+        append("V6：搜尋所有裝置，請保持畫面開啟");
         try {
             scanner=scanAdapter.getBluetoothLeScanner();
             if(scanner!=null) scanner.startScan(null,new android.bluetooth.le.ScanSettings.Builder().setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(),callback);
@@ -236,7 +280,7 @@ public class MainActivity extends Activity {
         try {if(scanner!=null)scanner.stopScan(callback);}catch(Exception ignored){}
         try {if(scanAdapter!=null)scanAdapter.cancelDiscovery();}catch(Exception ignored){}
         if(receiverRegistered){unregisterReceiver(discovery);receiverRegistered=false;}
-        append("搜尋結束，裝置紀錄數："+seen.size()+"；請點選裝置連線（支援 SPP B 測試列印）。");
+        append("搜尋結束，裝置紀錄數："+seen.size()+"；請點選裝置連線（支援 SPP 多協定測試）。");
     }
     private void connect(BluetoothDevice device, String label) {
         stopScan();
