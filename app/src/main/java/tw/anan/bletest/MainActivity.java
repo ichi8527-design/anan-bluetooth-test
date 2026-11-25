@@ -286,4 +286,16 @@ public class MainActivity extends Activity {
         byte[] v=queue.remove();int props=channel.getProperties();channel.setWriteType((props&4)!=0?BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE:BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);channel.setValue(v);waiting=true;try{if(!gatt.writeCharacteristic(channel)){waiting=false;fail("無法送出資料");return;}}catch(Exception e){fail(e.toString());return;}
         int token=generation;handler.postDelayed(()->{if(token==generation && busy && waiting) { /* overall deadline handles stalled callback */ }},1000);}
     private byte[][] raster(){Bitmap bm=Bitmap.createBitmap(384,240,Bitmap.Config.ARGB_8888);Canvas c=new Canvas(bm);c.drawColor(Color.WHITE);Paint p=new Paint(3);p.setColor(Color.BLACK);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(34);c.drawText("阿南檳榔",160,55,p);c.drawText("藍牙直印測試",160,105,p);p.setTextSize(30);c.drawText("AQ-V268",160,155,p);c.drawText("40 x 30 mm",160,200,p);byte[][] rows=new byte[240][48];for(int y=0;y<240;y++)for(int x=0;x<320;x++)if(Color.red(bm.getPixel(x,y))<128)rows[y][x/8]|=1<<(x%8);bm.recycle();return rows;}
-    private void print(boolean a){if(!ready || busy)return;begin(tx);deadline();append("開始協定 "+(a?"A":"B")+" 測試，320x240 內容／384 點資料列");if(a){stage=1;add(
+    private void print(boolean a){if(!ready || busy)return;begin(tx);deadline();append("開始協定 "+(a?"A":"B")+" 測試，320x240 內容／384 點資料列");if(a){stage=1;add(frame(true,0xa1,0));}else{add(frame(false,0xa3,0));add(frame(false,0xa6,0xaa,0x55,0x17,0x38,0x44,0x5f,0x5f,0x5f,0x44,0x38,0x2c));add(frame(false,0xbe,0));for(byte[] row:raster()){int[] v=new int[48];for(int i=0;i<48;i++)v[i]=row[i]&255;add(frame(false,0xa2,v));}add(frame(false,0xa6,0xaa,0x55,0x17,0,0,0,0,0,0,0,0x17));add(frame(false,0xa3,0));}pump();}
+    private void receive(byte[] v){append("RX: "+hex(v));if(v.length<9)return;int cmd=v[2]&255;if(v[0]==0x51 && v[1]==0x78 && cmd==0xae){int flags=v[6]&255;if((flags&15)!=0){fail("印表機回報可能異常");return;}paused=(flags&16)!=0;if(!paused)pump();}if(v[0]!=0x22 || v[1]!=0x21 || !busy)return;
+        if(stage==1 && cmd==0xa1){if(v.length<21 || v[12]!=0 || v[18]!=0){fail("A 狀態未確認就緒");return;}stage=2;add(frame(true,0xa9,240,0,48,0));pump();}
+        else if(stage==2 && cmd==0xa9){if(v[6]!=0){fail("A 啟動被拒絕");return;}stage=3;channel=data;for(byte[] row:raster())add(row);pump();}
+        else if(stage==4 && cmd==0xaa){stage=0;append("收到 A 完成通知，請確認實物。");pump();}}
+    @Override protected void onDestroy() {
+        stopScan();
+        closeSpp();
+        reset();
+        if (gatt != null) { gatt.disconnect(); gatt.close(); gatt = null; }
+        super.onDestroy();
+    }
+}
